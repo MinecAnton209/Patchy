@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Patchy", "Patchy\Patchy.csproj", "{662AFE92-6DE4-4C8F-8510-358E5D7A0681}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Patchy.Tool", "Patchy.Tool\Patchy.Tool.csproj", "{C629BDBC-C47A-4C96-A193-F735D8350CF5}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{662AFE92-6DE4-4C8F-8510-358E5D7A0681}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{662AFE92-6DE4-4C8F-8510-358E5D7A0681}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{662AFE92-6DE4-4C8F-8510-358E5D7A0681}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{662AFE92-6DE4-4C8F-8510-358E5D7A0681}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C629BDBC-C47A-4C96-A193-F735D8350CF5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C629BDBC-C47A-4C96-A193-F735D8350CF5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C629BDBC-C47A-4C96-A193-F735D8350CF5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C629BDBC-C47A-4C96-A193-F735D8350CF5}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
