@@ -42,6 +42,10 @@ namespace Patchy
 
             // 2. Prepare data for verification (the entire JSON object without the "Signature" field)
             var tempObj = JsonConvert.DeserializeObject<dynamic>(jsonContent);
+            if (tempObj == null)
+            {
+                throw new InvalidDataException("Update information is malformed.");
+            }
             tempObj.Signature = null;
             // Use Formatting.Indented to match the format used during signing
             string dataToVerify = JsonConvert.SerializeObject(tempObj, Formatting.Indented);

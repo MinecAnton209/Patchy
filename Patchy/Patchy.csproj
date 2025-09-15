@@ -4,10 +4,23 @@
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+
+        <PackageId>Patchy</PackageId>
+        <Version>0.1.0</Version>
+        <Authors>MinecAnton209</Authors>
+        <Company>MinecAnton209</Company>
+        <Description>A simple, secure, ECDsa-based self-updater library for .NET applications.</Description>
+        <PackageTags>updater; autoupdate; self-update; ECDsa; security; patcher</PackageTags>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/MinecAnton209/Patchy</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/MinecAnton209/Patchy.git</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        <None Include="$(MSBuildProjectDirectory)\..\README.md" Pack="true" PackagePath="\"/>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     </ItemGroup>
 
 </Project>

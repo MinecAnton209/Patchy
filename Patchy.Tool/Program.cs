@@ -1,10 +1,7 @@
-﻿using System;
-using System.IO;
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
 using Newtonsoft.Json;
-using Patchy; // Make sure you have a project reference to your 'Patchy' library project
+using Patchy;
 
 public class Program
 {
@@ -105,7 +102,12 @@ public class Program
         // 2. Read the info.json, update the hash, and clear any old signature
         Console.WriteLine($"Updating '{infoJsonPath}' with new hash...");
         string jsonContent = File.ReadAllText(infoJsonPath);
-        dynamic jsonObj = JsonConvert.DeserializeObject(jsonContent);
+        dynamic? jsonObj = JsonConvert.DeserializeObject(jsonContent);
+        
+        if (jsonObj == null)
+        {
+            throw new InvalidDataException($"The file '{infoJsonPath}' is not a valid JSON object.");
+        }
         
         jsonObj.FileHash = fileHash;
         jsonObj.Signature = null;

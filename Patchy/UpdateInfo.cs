@@ -1,14 +1,16 @@
-﻿namespace Patchy
+﻿using System.Collections.Generic;
+
+namespace Patchy
 {
     public class UpdateInfo
     {
-        public long VersionId { get; set; }
-        public string Version { get; set; }
-        public string ReleaseName { get; set; }
-        public string ReleaseType { get; set; }
-        public List<string> Changes { get; set; }
-        public string DownloadUrl { get; set; }
-        public string FileHash { get; set; }
-        public string Signature { get; set; }
+        public required long VersionId { get; set; }
+        public required string Version { get; set; }
+        public required string ReleaseName { get; set; }
+        public required string ReleaseType { get; set; }
+        public required List<string> Changes { get; set; }
+        public required string DownloadUrl { get; set; }
+        public required string FileHash { get; set; }
+        public required string Signature { get; set; }
     }
 }
