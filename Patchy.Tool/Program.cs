@@ -1,5 +1,6 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
+using BsDiff;
 using Newtonsoft.Json;
 using Patchy;
 
@@ -29,6 +30,19 @@ public class Program
                         return;
                     }
                     SignRelease(args[1], args[2], args[3]);
+                    break;
+                case "create-patch":
+                    if (args.Length < 4) { PrintUsage(); return; }
+                    CreatePatch(args[1], args[2], args[3]);
+                    break;
+                case "apply-patch":
+                    if (args.Length < 4)
+                    {
+                        Console.WriteLine("Error: Missing arguments for 'apply-patch' command.");
+                        PrintUsage();
+                        return;
+                    }
+                    await ApplyPatchTest(args[1], args[2], args[3]);
                     break;
                 case "update-check":
                     if (args.Length < 3)
@@ -208,6 +222,52 @@ public class Program
             Console.ResetColor();
         }
     }
+    
+    private static void CreatePatch(string oldFilePath, string newFilePath, string patchFilePath)
+    {
+        Console.WriteLine($"Creating patch from '{Path.GetFileName(oldFilePath)}' to '{Path.GetFileName(newFilePath)}'...");
+        if (!File.Exists(oldFilePath)) throw new FileNotFoundException("Old file not found.", oldFilePath);
+        if (!File.Exists(newFilePath)) throw new FileNotFoundException("New file not found.", newFilePath);
+
+        string? directory = Path.GetDirectoryName(patchFilePath);
+
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var oldFileBytes = File.ReadAllBytes(oldFilePath);
+        var newFileBytes = File.ReadAllBytes(newFilePath);
+
+        using (var outputStream = File.Create(patchFilePath))
+        {
+            BinaryPatch.Create(oldFileBytes, newFileBytes, outputStream);
+        }
+        
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"Successfully created patch: {patchFilePath}");
+        Console.ResetColor();
+    }
+    
+    private static async Task ApplyPatchTest(string oldFilePath, string patchFilePath, string newFilePath)
+    {
+        Console.WriteLine($"Testing patch application...");
+        var updater = new PatchyUpdater("test_url", "test_key");
+
+        try
+        {
+            await updater.ApplyPatchAsync(oldFilePath, patchFilePath, newFilePath);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("Patch applied successfully!");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"An error occurred during patch application: {ex.Message}");
+            Console.ResetColor();
+        }
+    }
 
     /// <summary>
     /// Prints the usage instructions for the command-line tool.
@@ -218,9 +278,10 @@ public class Program
         Console.WriteLine("Usage: Patchy.Tool.exe <command> [arguments]");
         Console.WriteLine();
         Console.WriteLine("Commands:");
-        Console.WriteLine("  generate-keys                                   Generates privateKey.pem and publicKey.pem");
-        Console.WriteLine("  sign <info.json> <privateKey.pem> <update.zip>  Calculates hash of update.zip, adds it to");
-        Console.WriteLine("                                                  info.json, and signs the file.");
-        Console.WriteLine("  update-check <url> <publicKey.pem>              Simulates a client update check");
+        Console.WriteLine("  generate-keys                          Generates privateKey.pem and publicKey.pem");
+        Console.WriteLine("  sign <info.json> <key> <update.zip>    Signs the release info file");
+        Console.WriteLine("  create-patch <old> <new> <patch_out>   Creates a binary patch");
+        Console.WriteLine("  apply-patch <old> <patch> <new_out>    Applies a binary patch (for testing)");
+        Console.WriteLine("  update-check <url> <publicKey.pem>     Simulates a client update check");
     }
 }

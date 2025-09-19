@@ -1,9 +1,6 @@
-﻿using System;
-using System.IO;
-using System.Net.Http;
+﻿using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
 using Newtonsoft.Json;
 
 namespace Patchy
@@ -110,6 +107,34 @@ namespace Patchy
                     return actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase);
                 }
             }
+        }
+        
+        /// <summary>
+        /// Applies a binary patch to an old file to create a new file.
+        /// </summary>
+        /// <param name="oldFilePath">The path to the original file.</param>
+        /// <param name="patchFilePath">The path to the downloaded patch file.</param>
+        /// <param name="newFilePath">The path where the new, patched file will be created.</param>
+        public Task ApplyPatchAsync(string oldFilePath, string patchFilePath, string newFilePath)
+        {
+            return Task.Run(() =>
+            {
+                Debug.WriteLine($"Applying patch '{Path.GetFileName(patchFilePath)}' to '{Path.GetFileName(oldFilePath)}'...");
+                try
+                {
+                    using (Stream oldFileStream = File.OpenRead(oldFilePath))
+                    using (Stream newFileStream = File.Create(newFilePath))
+                    {
+                        BsDiff.BinaryPatch.Apply(oldFileStream, () => File.OpenRead(patchFilePath), newFileStream);
+                    }
+                    Debug.WriteLine($"Successfully created new file: {newFilePath}");
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"!!! FAILED to apply patch: {ex.Message}");
+                    throw;
+                }
+            });
         }
     }
 }
