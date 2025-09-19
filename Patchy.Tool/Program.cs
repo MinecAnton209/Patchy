@@ -1,8 +1,10 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
 using BsDiff;
+using ICSharpCode.SharpZipLib.Tar;
 using Newtonsoft.Json;
 using Patchy;
+using Patchy.Models;
 
 public class Program
 {
@@ -52,6 +54,15 @@ public class Program
                         return;
                     }
                     await RunUpdateCheck(args[1], args[2]);
+                    break;
+                case "prepare-release":
+                    if (args.Length < 6)
+                    {
+                        Console.WriteLine("Error: Missing arguments for 'prepare-release' command.");
+                        PrintUsage();
+                        return;
+                    }
+                    PrepareRelease(args[1], args[2], args[3], args[4], args[5]);
                     break;
                 default:
                     Console.WriteLine($"Error: Unknown command '{command}'");
@@ -116,18 +127,14 @@ public class Program
         // 2. Read the info.json, update the hash, and clear any old signature
         Console.WriteLine($"Updating '{infoJsonPath}' with new hash...");
         string jsonContent = File.ReadAllText(infoJsonPath);
-        dynamic? jsonObj = JsonConvert.DeserializeObject(jsonContent);
+        var updateInfo = JsonConvert.DeserializeObject<UpdateInfo>(jsonContent);
+        if (updateInfo == null) throw new Exception("Failed to parse info.json");
         
-        if (jsonObj == null)
-        {
-            throw new InvalidDataException($"The file '{infoJsonPath}' is not a valid JSON object.");
-        }
-        
-        jsonObj.FileHash = fileHash;
-        jsonObj.Signature = null;
+        updateInfo.FileHash = fileHash;
+        updateInfo.Signature = null; 
         
         // 3. Prepare the data for signing
-        string dataToSign = JsonConvert.SerializeObject(jsonObj, Formatting.Indented);
+        string dataToSign = JsonConvert.SerializeObject(updateInfo, Formatting.Indented);
         
         Console.WriteLine($"Signing with '{privateKeyPath}'...");
         using (var ecdsa = ECDsa.Create())
@@ -138,8 +145,8 @@ public class Program
             string signature = Convert.ToBase64String(signatureBytes);
 
             // 4. Add the new signature and save the final file
-            jsonObj.Signature = signature;
-            string finalJson = JsonConvert.SerializeObject(jsonObj, Formatting.Indented);
+            updateInfo.Signature = signature;
+            string finalJson = JsonConvert.SerializeObject(updateInfo, Formatting.Indented);
             File.WriteAllText(infoJsonPath, finalJson);
 
             Console.ForegroundColor = ConsoleColor.Green;
@@ -268,20 +275,148 @@ public class Program
             Console.ResetColor();
         }
     }
+    
+    private static void PrepareRelease(string oldDir, string newDir, string outputDir, string privateKeyPath, string configPath)
+    {
+        Console.WriteLine("--- Preparing New Release ---");
+        
+        Console.WriteLine($"Loading release configuration from '{configPath}'...");
+        if (!File.Exists(configPath)) throw new FileNotFoundException("Release config file not found.", configPath);
+    
+        var releaseConfig = JsonConvert.DeserializeObject<ReleaseConfig>(File.ReadAllText(configPath));
+        if (releaseConfig == null) throw new Exception("Failed to parse release config file.");
+        
+        if (!Directory.Exists(oldDir)) throw new DirectoryNotFoundException($"Old version directory not found: {oldDir}");
+        if (!Directory.Exists(newDir)) throw new DirectoryNotFoundException($"New version directory not found: {newDir}");
+
+        if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        Directory.CreateDirectory(outputDir);
+
+        string oldArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
+        string newArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
+
+        try
+        {
+            Console.WriteLine($"Creating TAR archive for old version at '{oldArchiveFile}'...");
+            CreateTarArchive(oldDir, oldArchiveFile);
+            
+            Console.WriteLine($"Creating TAR archive for new version at '{newArchiveFile}'...");
+            CreateTarArchive(newDir, newArchiveFile);
+
+            string patchFileName = "update.patch";
+            string patchFile = Path.Combine(outputDir, patchFileName);
+            Console.WriteLine($"Creating binary patch '{patchFileName}'...");
+            CreatePatch(oldArchiveFile, newArchiveFile, patchFile);
+
+            Console.WriteLine("Generating release manifest (info.json)...");
+            var manifest = new SinglePatchManifest
+            {
+                VersionId = releaseConfig.NewVersionId,
+                Version = releaseConfig.Version,
+                FromVersionId = releaseConfig.FromVersionId,
+                ReleaseName = releaseConfig.ReleaseName,
+                Changes = releaseConfig.Changes,
+                PatchUrlBase = releaseConfig.PatchUrlBase,
+
+                PatchFile = patchFileName,
+                PatchHash = CalculateFileHash(patchFile),
+                SourceArchiveHash = CalculateFileHash(oldArchiveFile),
+                TargetArchiveHash = CalculateFileHash(newArchiveFile)
+            };
+            
+            string manifestPath = Path.Combine(outputDir, "info.json");
+            string json = JsonConvert.SerializeObject(manifest, Formatting.Indented);
+            File.WriteAllText(manifestPath, json);
+            
+            SignSimplifiedManifest(manifestPath, privateKeyPath);
+        }
+        finally
+        {
+            Console.WriteLine("Cleaning up temporary files...");
+            if (File.Exists(oldArchiveFile)) File.Delete(oldArchiveFile);
+            if (File.Exists(newArchiveFile)) File.Delete(newArchiveFile);
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"--- Release prepared successfully in '{outputDir}' ---");
+        Console.ResetColor();
+    }
+    
+    private static void CreateTarArchive(string sourceDirectory, string tarFilePath)
+    {
+        using (FileStream fs = new FileStream(tarFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (TarOutputStream tarStream = new TarOutputStream(fs, System.Text.Encoding.UTF8))
+        {
+            var files = Directory.GetFiles(sourceDirectory, "*.*", SearchOption.AllDirectories);
+            Array.Sort(files);
+
+            foreach (string filename in files)
+            {
+                FileInfo fileInfo = new FileInfo(filename);
+            
+                string relativePath = Path.GetRelativePath(sourceDirectory, filename);
+            
+                TarEntry entry = TarEntry.CreateEntryFromFile(filename);
+                entry.Name = relativePath.Replace(Path.DirectorySeparatorChar, '/');
+            
+                tarStream.PutNextEntry(entry);
+
+                using (FileStream inputFileStream = File.OpenRead(filename))
+                {
+                    inputFileStream.CopyTo(tarStream);
+                }
+            
+                tarStream.CloseEntry();
+            }
+        }
+    }
+    
+    private static void SignSimplifiedManifest(string manifestPath, string privateKeyPath)
+    {
+        Console.WriteLine($"Signing manifest '{manifestPath}'...");
+    
+        string jsonContent = File.ReadAllText(manifestPath);
+        var manifest = JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent);
+        if (manifest == null) throw new Exception("Failed to parse manifest file.");
+        
+        manifest.Signature = null;
+        string dataToSign = JsonConvert.SerializeObject(manifest, Formatting.Indented);
+    
+        using (var ecdsa = ECDsa.Create())
+        {
+            ecdsa.ImportFromPem(File.ReadAllText(privateKeyPath));
+            var dataBytes = Encoding.UTF8.GetBytes(dataToSign);
+            var signatureBytes = ecdsa.SignData(dataBytes, HashAlgorithmName.SHA256);
+            string signature = Convert.ToBase64String(signatureBytes);
+
+            manifest.Signature = signature;
+            string finalJson = JsonConvert.SerializeObject(manifest, Formatting.Indented);
+            File.WriteAllText(manifestPath, finalJson);
+        
+            Console.WriteLine("Manifest signed successfully!");
+        }
+    }
 
     /// <summary>
     /// Prints the usage instructions for the command-line tool.
     /// </summary>
     private static void PrintUsage()
     {
-        Console.WriteLine("Patchy.Tool - A utility for signing and testing updates.");
-        Console.WriteLine("Usage: Patchy.Tool.exe <command> [arguments]");
-        Console.WriteLine();
-        Console.WriteLine("Commands:");
-        Console.WriteLine("  generate-keys                          Generates privateKey.pem and publicKey.pem");
-        Console.WriteLine("  sign <info.json> <key> <update.zip>    Signs the release info file");
-        Console.WriteLine("  create-patch <old> <new> <patch_out>   Creates a binary patch");
-        Console.WriteLine("  apply-patch <old> <patch> <new_out>    Applies a binary patch (for testing)");
-        Console.WriteLine("  update-check <url> <publicKey.pem>     Simulates a client update check");
+        Console.WriteLine("Patchy.Tool - A utility for creating and signing binary patch releases.");
+        Console.WriteLine("\nUsage: Patchy.Tool.exe <command> [arguments]\n");
+        
+        Console.WriteLine("--- Main Commands ---");
+        Console.WriteLine("  prepare-release <old_dir> <new_dir> <output_dir> <private_key> <config.json>");
+        Console.WriteLine("    Compares two directories, creates binary patches, generates, and signs the release manifest (info.json).\n");
+
+        Console.WriteLine("--- Utility Commands ---");
+        Console.WriteLine("  generate-keys");
+        Console.WriteLine("    Generates a new private/public key pair (privateKey.pem, publicKey.pem).\n");
+
+        Console.WriteLine("--- Testing Commands ---");
+        Console.WriteLine("  create-patch <old_file> <new_file> <patch_output>");
+        Console.WriteLine("    Creates a single binary patch from an old file to a new file.");
+        Console.WriteLine("  apply-patch <old_file> <patch_file> <new_file_output>");
+        Console.WriteLine("    Applies a single binary patch to an old file to create the new file.");
     }
 }
