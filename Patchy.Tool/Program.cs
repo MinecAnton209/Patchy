@@ -189,7 +189,7 @@ public class Program
         Console.WriteLine($"Public Key: {publicKeyPath}");
 
         string publicKey = File.ReadAllText(publicKeyPath);
-        var updater = new PatchyUpdater(infoJsonUrl, publicKey);
+        var updater = new PatchyUpdater(infoJsonUrl, publicKey, () => Task.FromResult(true));
         
         long currentVersionId = 2025091400; // Example: current version of the application
         Console.WriteLine($"Current application version ID: {currentVersionId}");
@@ -263,8 +263,7 @@ public class Program
     private static async Task ApplyPatchTest(string oldFilePath, string patchFilePath, string newFilePath)
     {
         Console.WriteLine($"Testing patch application...");
-        var updater = new PatchyUpdater("test_url", "test_key");
-
+        var updater = new PatchyUpdater("test_url", "test_key", () => Task.FromResult(true));
         try
         {
             await updater.ApplyPatchAsync(oldFilePath, patchFilePath, newFilePath);
@@ -422,7 +421,7 @@ public class Program
         Console.WriteLine("--- Testing Full Update Cycle ---");
     
         string publicKey = File.ReadAllText(publicKeyPath);
-        var updater = new PatchyUpdater(infoJsonUrl, publicKey);
+        var updater = new PatchyUpdater(infoJsonUrl, publicKey, () => Task.FromResult(true));
         
         long testCurrentVersionId = 1; 
     

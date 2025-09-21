@@ -13,14 +13,6 @@ namespace Patchy
         private readonly string _publicKeyPem;
         private readonly Func<Task<bool>> _confirmFullDownload;
 
-        public PatchyUpdater(string infoUrl, string publicKeyPem)
-        {
-            _infoUrl = infoUrl;
-            _publicKeyPem = publicKeyPem;
-            _httpClient = new HttpClient();
-            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Patchy-Updater");
-        }
-
         /// <summary>
         /// Checks for updates, verifies the signature of the update information.
         /// </summary>
@@ -424,7 +416,8 @@ namespace Patchy
             _infoUrl = infoUrl;
             _publicKeyPem = publicKeyPem;
             _httpClient = new HttpClient();
-            _confirmFullDownload = confirmFullDownloadCallback;
+            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Patchy-Updater");
+            _confirmFullDownload = confirmFullDownloadCallback ?? throw new ArgumentNullException(nameof(confirmFullDownloadCallback));
         }
     }
 }
