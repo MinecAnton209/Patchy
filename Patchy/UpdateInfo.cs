@@ -59,6 +59,18 @@ namespace Patchy
         public string SourceArchiveHash { get; set; } = string.Empty;
         public string TargetArchiveHash { get; set; } = string.Empty;
         public string PatchUrlBase { get; set; } = string.Empty;
+        
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FullPackageFile { get; set; }
+        
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FullPackageHash { get; set; }
+        
+        public string InstallerFile { get; set; } = string.Empty;
+        
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? InstallerFileHash { get; set; }
+        
         public string? Signature { get; set; }
     }
 }

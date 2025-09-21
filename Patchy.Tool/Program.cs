@@ -56,13 +56,17 @@ public class Program
                     await RunUpdateCheck(args[1], args[2]);
                     break;
                 case "prepare-release":
-                    if (args.Length < 6)
+                    if (args.Length < 7)
                     {
                         Console.WriteLine("Error: Missing arguments for 'prepare-release' command.");
                         PrintUsage();
                         return;
                     }
-                    PrepareRelease(args[1], args[2], args[3], args[4], args[5]);
+                    PrepareRelease(args[1], args[2], args[3], args[4], args[5], args[6]);
+                    break;
+                case "test-update":
+                    if (args.Length < 4) { PrintUsage(); return; }
+                    await TestFullUpdate(args[1], args[2], args[3]);
                     break;
                 default:
                     Console.WriteLine($"Error: Unknown command '{command}'");
@@ -120,7 +124,7 @@ public class Program
         }
 
         // 1. Calculate the hash of the update file
-        Console.WriteLine($"Calculating SHA256 hash for '{updateFilePath}'...");
+        Console.WriteLine($"Calculating ECDsa hash for '{updateFilePath}'...");
         string fileHash = CalculateFileHash(updateFilePath);
         Console.WriteLine($"Calculated Hash: {fileHash}");
 
@@ -276,13 +280,12 @@ public class Program
         }
     }
     
-    private static void PrepareRelease(string oldDir, string newDir, string outputDir, string privateKeyPath, string configPath)
+    private static void PrepareRelease(string oldDir, string newDir, string outputDir, string privateKeyPath, string configPath, string installerPath)
     {
         Console.WriteLine("--- Preparing New Release ---");
         
         Console.WriteLine($"Loading release configuration from '{configPath}'...");
         if (!File.Exists(configPath)) throw new FileNotFoundException("Release config file not found.", configPath);
-    
         var releaseConfig = JsonConvert.DeserializeObject<ReleaseConfig>(File.ReadAllText(configPath));
         if (releaseConfig == null) throw new Exception("Failed to parse release config file.");
         
@@ -292,22 +295,34 @@ public class Program
         if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
         Directory.CreateDirectory(outputDir);
 
+        string? fullPackageHash = null;
+        if (!string.IsNullOrEmpty(releaseConfig.FullPackageFile))
+        {
+            Console.WriteLine($"Creating full release package '{releaseConfig.FullPackageFile}'...");
+            string fullPackagePath = Path.Combine(outputDir, releaseConfig.FullPackageFile);
+            System.IO.Compression.ZipFile.CreateFromDirectory(newDir, fullPackagePath);
+            fullPackageHash = CalculateFileHash(fullPackagePath);
+            Console.WriteLine("Full release package created successfully.");
+        }
+
         string oldArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
         string newArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
-
+        string patchFileName = "update.patch";
+        string patchFile = Path.Combine(outputDir, patchFileName);
+        
+        if (!File.Exists(installerPath)) throw new FileNotFoundException("Installer executable not found!", installerPath);
+    
+        string installerDestPath = Path.Combine(outputDir, releaseConfig.InstallerFile);
+        File.Copy(installerPath, installerDestPath, true);
+        string installerHash = CalculateFileHash(installerDestPath);
+        Console.WriteLine($"Installer '{releaseConfig.InstallerFile}' prepared with hash: {installerHash}");
+        
         try
         {
-            Console.WriteLine($"Creating TAR archive for old version at '{oldArchiveFile}'...");
             CreateTarArchive(oldDir, oldArchiveFile);
-            
-            Console.WriteLine($"Creating TAR archive for new version at '{newArchiveFile}'...");
             CreateTarArchive(newDir, newArchiveFile);
-
-            string patchFileName = "update.patch";
-            string patchFile = Path.Combine(outputDir, patchFileName);
-            Console.WriteLine($"Creating binary patch '{patchFileName}'...");
             CreatePatch(oldArchiveFile, newArchiveFile, patchFile);
-
+            
             Console.WriteLine("Generating release manifest (info.json)...");
             var manifest = new SinglePatchManifest
             {
@@ -317,15 +332,19 @@ public class Program
                 ReleaseName = releaseConfig.ReleaseName,
                 Changes = releaseConfig.Changes,
                 PatchUrlBase = releaseConfig.PatchUrlBase,
-
                 PatchFile = patchFileName,
                 PatchHash = CalculateFileHash(patchFile),
                 SourceArchiveHash = CalculateFileHash(oldArchiveFile),
-                TargetArchiveHash = CalculateFileHash(newArchiveFile)
+                TargetArchiveHash = CalculateFileHash(newArchiveFile),
+                
+                FullPackageFile = releaseConfig.FullPackageFile,
+                FullPackageHash = fullPackageHash,
+                InstallerFile = releaseConfig.InstallerFile,
+                InstallerFileHash = installerHash,
             };
             
             string manifestPath = Path.Combine(outputDir, "info.json");
-            string json = JsonConvert.SerializeObject(manifest, Formatting.Indented);
+            string json = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings { Formatting = Formatting.Indented, NullValueHandling = NullValueHandling.Ignore });
             File.WriteAllText(manifestPath, json);
             
             SignSimplifiedManifest(manifestPath, privateKeyPath);
@@ -381,7 +400,8 @@ public class Program
         
         manifest.Signature = null;
         string dataToSign = JsonConvert.SerializeObject(manifest, Formatting.Indented);
-    
+        dataToSign = dataToSign.Replace("\r\n", "\n");
+        
         using (var ecdsa = ECDsa.Create())
         {
             ecdsa.ImportFromPem(File.ReadAllText(privateKeyPath));
@@ -392,8 +412,32 @@ public class Program
             manifest.Signature = signature;
             string finalJson = JsonConvert.SerializeObject(manifest, Formatting.Indented);
             File.WriteAllText(manifestPath, finalJson);
-        
+    
             Console.WriteLine("Manifest signed successfully!");
+        }
+    }
+    
+    private static async Task TestFullUpdate(string currentVersionDir, string infoJsonUrl, string publicKeyPath)
+    {
+        Console.WriteLine("--- Testing Full Update Cycle ---");
+    
+        string publicKey = File.ReadAllText(publicKeyPath);
+        var updater = new PatchyUpdater(infoJsonUrl, publicKey);
+        
+        long testCurrentVersionId = 1; 
+    
+        try
+        {
+            await updater.PerformUpdateAsync(currentVersionDir, testCurrentVersionId);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("\nUpdate cycle completed successfully!");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\nAn error occurred during update: {ex.Message}");
+            Console.ResetColor();
         }
     }
 
@@ -418,5 +462,7 @@ public class Program
         Console.WriteLine("    Creates a single binary patch from an old file to a new file.");
         Console.WriteLine("  apply-patch <old_file> <patch_file> <new_file_output>");
         Console.WriteLine("    Applies a single binary patch to an old file to create the new file.");
+        Console.WriteLine("  test-update <current_dir> <info_url> <public_key>");
+        Console.WriteLine("    Simulates a full client-side update process.\n");
     }
 }

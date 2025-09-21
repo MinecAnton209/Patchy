@@ -13,5 +13,9 @@ namespace Patchy.Models
         public string ReleaseName { get; set; } = string.Empty;
         public List<string> Changes { get; set; } = new();
         public string PatchUrlBase { get; set; } = string.Empty;
+        public string? FullPackageFile { get; set; }
+        
+        public string InstallerFile { get; set; } = string.Empty;
+        public string InstallerFileHash { get; set; } = string.Empty;
     }
 }
