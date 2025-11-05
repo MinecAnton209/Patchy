@@ -6,7 +6,7 @@
         <Nullable>enable</Nullable>
 
         <PackageId>Patchy</PackageId>
-        <Version>0.2.2</Version>
+        <Version>0.2.3</Version>
         <Authors>MinecAnton209</Authors>
         <Company>MinecAnton209</Company>
         <Description>A simple, secure, ECDsa-based self-updater library for .NET applications.</Description>
