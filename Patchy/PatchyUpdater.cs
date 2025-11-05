@@ -416,6 +416,10 @@ namespace Patchy
             _infoUrl = infoUrl;
             _publicKeyPem = publicKeyPem;
             _httpClient = new HttpClient();
+            var handler = new HttpClientHandler()
+            {
+                AllowAutoRedirect = true
+            };
             _httpClient.DefaultRequestHeaders.Add("User-Agent", "Patchy-Updater");
             _confirmFullDownload = confirmFullDownloadCallback ?? throw new ArgumentNullException(nameof(confirmFullDownloadCallback));
         }
