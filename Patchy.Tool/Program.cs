@@ -68,6 +68,10 @@ public class Program
                     if (args.Length < 4) { PrintUsage(); return; }
                     await TestFullUpdate(args[1], args[2], args[3]);
                     break;
+                case "hash":
+                    if (args.Length < 2) { Console.WriteLine("Error: Missing file path."); return; }
+                    Console.WriteLine(CalculateFileHash(args[1]));
+                    break;
                 default:
                     Console.WriteLine($"Error: Unknown command '{command}'");
                     PrintUsage();
@@ -442,7 +446,7 @@ public class Program
 
     /// <summary>
     /// Prints the usage instructions for the command-line tool.
-    /// </summary>
+    /// </summary> 
     private static void PrintUsage()
     {
         Console.WriteLine("Patchy.Tool - A utility for creating and signing binary patch releases.");
@@ -462,6 +466,8 @@ public class Program
         Console.WriteLine("  apply-patch <old_file> <patch_file> <new_file_output>");
         Console.WriteLine("    Applies a single binary patch to an old file to create the new file.");
         Console.WriteLine("  test-update <current_dir> <info_url> <public_key>");
-        Console.WriteLine("    Simulates a full client-side update process.\n");
+        Console.WriteLine("    Simulates a full client-side update process");
+        Console.WriteLine("  hash <file_path>");
+        Console.WriteLine("    Calculates the SHA256 hash of a file.\n");
     }
 }

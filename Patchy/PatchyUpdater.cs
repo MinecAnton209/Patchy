@@ -240,7 +240,7 @@ namespace Patchy
             }
         }
         
-        private async Task<string> DownloadFileAsync(string url, string fileName)
+        /*private async Task<string> DownloadFileAsync(string url, string fileName)
         {
             string tempPath = Path.Combine(Path.GetTempPath(), fileName);
             var response = await _httpClient.GetAsync(url);
@@ -249,6 +249,16 @@ namespace Patchy
             {
                 await response.Content.CopyToAsync(fs);
             }
+            return tempPath;
+        }*/
+        
+        private async Task<string> DownloadFileAsync(string url, string fileName)
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), fileName);
+            
+            var fileBytes = await _httpClient.GetByteArrayAsync(url);
+            await File.WriteAllBytesAsync(tempPath, fileBytes);
+    
             return tempPath;
         }
             
