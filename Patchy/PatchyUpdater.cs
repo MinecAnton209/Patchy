@@ -278,7 +278,7 @@ namespace Patchy
         /// Downloads the release manifest and verifies its digital signature.
         /// </summary>
         /// <returns>A valid and trusted SinglePatchManifest object.</returns>
-        private async Task<SinglePatchManifest> CheckForSimplifiedUpdateAsync()
+        public async Task<SinglePatchManifest> CheckForSimplifiedUpdateAsync()
         {
             string jsonContent = await _httpClient.GetStringAsync(_infoUrl);
             var manifest = JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent);
