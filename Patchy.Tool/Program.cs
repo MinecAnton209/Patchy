@@ -1,4 +1,5 @@
-﻿using System.Security.Cryptography;
+using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text;
 using BsDiff;
 using ICSharpCode.SharpZipLib.Tar;
@@ -71,6 +72,15 @@ public class Program
                 case "hash":
                     if (args.Length < 2) { Console.WriteLine("Error: Missing file path."); return; }
                     Console.WriteLine(CalculateFileHash(args[1]));
+                    break;
+                case "create-update-package":
+                    if (args.Length < 5)
+                    {
+                        Console.WriteLine("Error: Missing arguments for 'create-update-package' command.");
+                        PrintUsage();
+                        return;
+                    }
+                    CreateUpdatePackage(args[1], args[2], args[3], args[4], args.Length > 5 ? args[5] : null);
                     break;
                 default:
                     Console.WriteLine($"Error: Unknown command '{command}'");
@@ -453,8 +463,9 @@ public class Program
         Console.WriteLine("\nUsage: Patchy.Tool.exe <command> [arguments]\n");
         
         Console.WriteLine("--- Main Commands ---");
-        Console.WriteLine("  prepare-release <old_dir> <new_dir> <output_dir> <private_key> <config.json>");
-        Console.WriteLine("    Compares two directories, creates binary patches, generates, and signs the release manifest (info.json).\n");
+        Console.WriteLine("  create-update-package <old_dir> <new_dir> <output_dir> <private_key> [config.json]");
+        Console.WriteLine("    Creates a file-level update package with per-file patches.");
+        Console.WriteLine("    Output: update.pkg (ZIP with meta.json, diffs/, add/)\n");
 
         Console.WriteLine("--- Utility Commands ---");
         Console.WriteLine("  generate-keys");
@@ -465,9 +476,246 @@ public class Program
         Console.WriteLine("    Creates a single binary patch from an old file to a new file.");
         Console.WriteLine("  apply-patch <old_file> <patch_file> <new_file_output>");
         Console.WriteLine("    Applies a single binary patch to an old file to create the new file.");
-        Console.WriteLine("  test-update <current_dir> <info_url> <public_key>");
-        Console.WriteLine("    Simulates a full client-side update process");
         Console.WriteLine("  hash <file_path>");
         Console.WriteLine("    Calculates the SHA256 hash of a file.\n");
+    }
+    
+    /// <summary>
+    /// Creates a file-level update package by comparing two directories.
+    /// Generates per-file bsdiff patches for modified files.
+    /// </summary>
+    private static void CreateUpdatePackage(string oldDir, string newDir, string outputDir, string privateKeyPath, string? configPath)
+    {
+        Console.WriteLine("--- Creating Update Package ---");
+        Console.WriteLine($"Old directory: {oldDir}");
+        Console.WriteLine($"New directory: {newDir}");
+        Console.WriteLine($"Output directory: {outputDir}");
+        
+        if (!Directory.Exists(oldDir)) throw new DirectoryNotFoundException($"Old directory not found: {oldDir}");
+        if (!Directory.Exists(newDir)) throw new DirectoryNotFoundException($"New directory not found: {newDir}");
+        if (!File.Exists(privateKeyPath)) throw new FileNotFoundException("Private key not found.", privateKeyPath);
+        
+        // Load config if provided
+        ReleaseConfig? config = null;
+        if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
+        {
+            config = JsonConvert.DeserializeObject<ReleaseConfig>(File.ReadAllText(configPath));
+            Console.WriteLine($"Loaded config from: {configPath}");
+        }
+        
+        // Create output structure
+        if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        Directory.CreateDirectory(outputDir);
+        
+        string tempDir = Path.Combine(Path.GetTempPath(), "patchy_" + Guid.NewGuid().ToString("N"));
+        string diffsDir = Path.Combine(tempDir, "diffs");
+        string addDir = Path.Combine(tempDir, "add");
+        Directory.CreateDirectory(diffsDir);
+        Directory.CreateDirectory(addDir);
+        
+        try
+        {
+            // Scan directories
+            Console.WriteLine("\nScanning directories...");
+            var oldFiles = GetRelativeFiles(oldDir);
+            var newFiles = GetRelativeFiles(newDir);
+            
+            Console.WriteLine($"  Old: {oldFiles.Count} files");
+            Console.WriteLine($"  New: {newFiles.Count} files");
+            
+            var fileActions = new List<FileAction>();
+            int patchCount = 0, addCount = 0, removeCount = 0, unchangedCount = 0;
+            
+            // Process new/modified files
+            foreach (var relativePath in newFiles)
+            {
+                string oldFilePath = Path.Combine(oldDir, relativePath);
+                string newFilePath = Path.Combine(newDir, relativePath);
+                string newHash = CalculateFileHash(newFilePath);
+
+                if (oldFiles.Contains(relativePath))
+                {
+                    string oldHash = CalculateFileHash(oldFilePath);
+
+                    if (oldHash.Equals(newHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        unchangedCount++;
+                        continue;
+                    }
+
+                    string safeName = relativePath.Replace(Path.DirectorySeparatorChar, '_').Replace('/', '_');
+                    string patchFileName = safeName + ".patch";
+                    string patchPath = Path.Combine(diffsDir, patchFileName);
+
+                    Console.WriteLine($"  [PATCH] {relativePath}");
+                    CreatePatchFile(oldFilePath, newFilePath, patchPath);
+
+                    string patchFileHash = CalculateFileHash(patchPath);
+
+                    fileActions.Add(new FileAction
+                    {
+                        Path = relativePath.Replace('\\', '/'),
+                        Action = "modified",
+                        PatchFile = "diffs/" + patchFileName,
+                        PackageFileHash = patchFileHash,
+                        SourceHash = oldHash,
+                        TargetHash = newHash
+                    });
+                    patchCount++;
+                }
+                else
+                {
+                    string safeName = relativePath.Replace(Path.DirectorySeparatorChar, '_').Replace('/', '_');
+                    string addPath = Path.Combine(addDir, safeName);
+                    
+                    Console.WriteLine($"  [ADD] {relativePath}");
+                    File.Copy(newFilePath, addPath);
+                    
+                    fileActions.Add(new FileAction
+                    {
+                        Path = relativePath.Replace('\\', '/'),
+                        Action = "added",
+                        AddFile = "add/" + safeName,
+                        PackageFileHash = newHash,
+                        TargetHash = newHash
+                    });
+                    addCount++;
+                }
+            }
+            
+            // Process removed files
+            foreach (var relativePath in oldFiles)
+            {
+                if (!newFiles.Contains(relativePath))
+                {
+                    Console.WriteLine($"  [REMOVE] {relativePath}");
+                    fileActions.Add(new FileAction
+                    {
+                        Path = relativePath.Replace('\\', '/'),
+                        Action = "removed"
+                    });
+                    removeCount++;
+                }
+            }
+            
+            Console.WriteLine($"\nSummary: {patchCount} modified, {addCount} added, {removeCount} removed, {unchangedCount} unchanged");
+            
+            // Generate manifest
+            var manifest = new UpdatePackageManifest
+            {
+                VersionId = config?.NewVersionId ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                Version = config?.Version ?? "1.0.0",
+                FromVersionId = config?.FromVersionId ?? 0,
+                ReleaseName = config?.ReleaseName ?? "Update Package",
+                Changes = config?.Changes ?? new List<string>(),
+                Files = fileActions
+            };
+            
+            // Write manifest (unsigned first)
+            string manifestPath = Path.Combine(tempDir, "meta.json");
+            string json = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings 
+            { 
+                Formatting = Formatting.Indented, 
+                NullValueHandling = NullValueHandling.Ignore 
+            });
+            File.WriteAllText(manifestPath, json);
+            
+            // Sign manifest
+            Console.WriteLine("\nSigning manifest...");
+            SignUpdatePackageManifest(manifestPath, privateKeyPath);
+            
+            // Create update.pkg (ZIP)
+            string packagePath = Path.Combine(outputDir, "update.pkg");
+            Console.WriteLine($"\nCreating package: {packagePath}");
+            
+            if (File.Exists(packagePath)) File.Delete(packagePath);
+            ZipFile.CreateFromDirectory(tempDir, packagePath, CompressionLevel.Optimal, false);
+            
+            // Also copy meta.json standalone for easy inspection
+            File.Copy(manifestPath, Path.Combine(outputDir, "meta.json"), true);
+            
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n--- Update package created successfully! ---");
+            Console.WriteLine($"Package: {packagePath}");
+            Console.WriteLine($"Size: {new FileInfo(packagePath).Length:N0} bytes");
+            Console.ResetColor();
+        }
+        finally
+        {
+            // Cleanup temp directory
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Gets all files in a directory as relative paths.
+    /// </summary>
+    private static HashSet<string> GetRelativeFiles(string directory)
+    {
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in Directory.GetFiles(directory, "*.*", SearchOption.AllDirectories))
+        {
+            files.Add(Path.GetRelativePath(directory, file));
+        }
+        return files;
+    }
+    
+    /// <summary>
+    /// Creates a bsdiff patch file.
+    /// </summary>
+    private static void CreatePatchFile(string oldFilePath, string newFilePath, string patchPath)
+    {
+        string? directory = Path.GetDirectoryName(patchPath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var oldFileBytes = File.ReadAllBytes(oldFilePath);
+        var newFileBytes = File.ReadAllBytes(newFilePath);
+
+        using (var outputStream = File.Create(patchPath))
+        {
+            BinaryPatch.Create(oldFileBytes, newFileBytes, outputStream);
+        }
+    }
+    
+    /// <summary>
+    /// Signs the update package manifest with a private key.
+    /// </summary>
+    private static void SignUpdatePackageManifest(string manifestPath, string privateKeyPath)
+    {
+        string jsonContent = File.ReadAllText(manifestPath);
+        var manifest = JsonConvert.DeserializeObject<UpdatePackageManifest>(jsonContent);
+        if (manifest == null) throw new Exception("Failed to parse manifest file.");
+        
+        manifest.Signature = null;
+        string dataToSign = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings
+        {
+            Formatting = Formatting.Indented,
+            NullValueHandling = NullValueHandling.Ignore
+        });
+        dataToSign = dataToSign.Replace("\r\n", "\n");
+        
+        using (var ecdsa = ECDsa.Create())
+        {
+            ecdsa.ImportFromPem(File.ReadAllText(privateKeyPath));
+            var dataBytes = Encoding.UTF8.GetBytes(dataToSign);
+            var signatureBytes = ecdsa.SignData(dataBytes, HashAlgorithmName.SHA256);
+            string signature = Convert.ToBase64String(signatureBytes);
+
+            manifest.Signature = signature;
+            string finalJson = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings
+            {
+                Formatting = Formatting.Indented,
+                NullValueHandling = NullValueHandling.Ignore
+            });
+            File.WriteAllText(manifestPath, finalJson);
+
+            Console.WriteLine("Manifest signed successfully!");
+        }
     }
 }

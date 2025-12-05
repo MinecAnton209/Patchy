@@ -1,8 +1,10 @@
 ﻿using System.Diagnostics;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using ICSharpCode.SharpZipLib.Tar;
 using Newtonsoft.Json;
+using Patchy.Models;
 
 namespace Patchy
 {
@@ -419,6 +421,205 @@ namespace Patchy
             Debug.WriteLine("Full package hash OK.");
     
             return downloadedZip;
+        }
+        
+        /// <summary>
+        /// Applies an update package (update.pkg) to a target directory.
+        /// Verifies the manifest signature and all file hashes.
+        /// </summary>
+        /// <param name="packagePath">Path to the update.pkg file.</param>
+        /// <param name="targetDirectory">Directory to apply the update to.</param>
+        /// <returns>The UpdatePackageManifest that was applied.</returns>
+        /// <exception cref="CryptographicException">Thrown if signature or hash verification fails.</exception>
+        public async Task<UpdatePackageManifest> ApplyUpdatePackageAsync(string packagePath, string targetDirectory)
+        {
+            Debug.WriteLine($"Applying update package: {packagePath}");
+            Debug.WriteLine($"Target directory: {targetDirectory}");
+            
+            string extractDir = Path.Combine(Path.GetTempPath(), "patchy_apply_" + Guid.NewGuid().ToString("N"));
+            
+            try
+            {
+                // 1. Extract package
+                Debug.WriteLine("Extracting package...");
+                ZipFile.ExtractToDirectory(packagePath, extractDir);
+                
+                // 2. Read and verify manifest
+                string manifestPath = Path.Combine(extractDir, "meta.json");
+                if (!File.Exists(manifestPath))
+                {
+                    throw new InvalidDataException("Package does not contain meta.json manifest.");
+                }
+                
+                string jsonContent = await File.ReadAllTextAsync(manifestPath);
+                var manifest = JsonConvert.DeserializeObject<UpdatePackageManifest>(jsonContent);
+                
+                if (manifest == null || string.IsNullOrEmpty(manifest.Signature))
+                {
+                    throw new InvalidDataException("Manifest is malformed or signature is missing.");
+                }
+                
+                // Verify signature
+                var signature = manifest.Signature;
+                manifest.Signature = null;
+                string dataToVerify = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings
+                {
+                    Formatting = Formatting.Indented,
+                    NullValueHandling = NullValueHandling.Ignore
+                });
+                dataToVerify = dataToVerify.Replace("\r\n", "\n");
+                manifest.Signature = signature;
+                
+                if (!VerifySignature(dataToVerify, signature))
+                {
+                    throw new CryptographicException("SIGNATURE VERIFICATION FAILED! The update manifest has been tampered with.");
+                }
+                Debug.WriteLine("Manifest signature is VALID.");
+                
+                // 3. Apply file actions
+                int applied = 0;
+                foreach (var fileAction in manifest.Files)
+                {
+                    string targetPath = Path.Combine(targetDirectory, fileAction.Path.Replace('/', Path.DirectorySeparatorChar));
+                    
+                    switch (fileAction.Action.ToLower())
+                    {
+                        case "modified":
+                            await ApplyModifiedFileAsync(extractDir, targetPath, fileAction);
+                            applied++;
+                            break;
+                            
+                        case "added":
+                            await ApplyAddedFileAsync(extractDir, targetPath, fileAction);
+                            applied++;
+                            break;
+                            
+                        case "removed":
+                            ApplyRemovedFile(targetPath, fileAction);
+                            applied++;
+                            break;
+                            
+                        default:
+                            Debug.WriteLine($"Unknown action type: {fileAction.Action} for {fileAction.Path}");
+                            break;
+                    }
+                }
+                
+                Debug.WriteLine($"Applied {applied} file actions successfully.");
+                return manifest;
+            }
+            finally
+            {
+                // Cleanup
+                if (Directory.Exists(extractDir))
+                {
+                    try { Directory.Delete(extractDir, true); } catch { }
+                }
+            }
+        }
+        
+        private async Task ApplyModifiedFileAsync(string extractDir, string targetPath, FileAction fileAction)
+        {
+            Debug.WriteLine($"Applying patch to: {fileAction.Path}");
+            
+            if (!File.Exists(targetPath))
+            {
+                throw new FileNotFoundException($"Target file not found for patching: {fileAction.Path}");
+            }
+            
+            // Verify source hash
+            if (!string.IsNullOrEmpty(fileAction.SourceHash))
+            {
+                string actualSourceHash = CalculateFileHash(targetPath);
+                if (!actualSourceHash.Equals(fileAction.SourceHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new CryptographicException($"Source hash mismatch for {fileAction.Path}. Expected: {fileAction.SourceHash}, Got: {actualSourceHash}");
+                }
+            }
+            
+            // Apply patch
+            string patchPath = Path.Combine(extractDir, fileAction.PatchFile!.Replace('/', Path.DirectorySeparatorChar));
+            string tempOutputPath = targetPath + ".patched";
+            
+            if (!string.IsNullOrEmpty(fileAction.PackageFileHash))
+            {
+                string actualPatchHash = CalculateFileHash(patchPath);
+                if (!actualPatchHash.Equals(fileAction.PackageFileHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new CryptographicException($"Corrupted patch file in package: {fileAction.PatchFile}");
+                }
+            }
+            
+            await ApplyPatchAsync(targetPath, patchPath, tempOutputPath);
+            
+            // Verify target hash
+            if (!string.IsNullOrEmpty(fileAction.TargetHash))
+            {
+                string actualTargetHash = CalculateFileHash(tempOutputPath);
+                if (!actualTargetHash.Equals(fileAction.TargetHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(tempOutputPath);
+                    throw new CryptographicException($"Target hash mismatch after patching {fileAction.Path}. Expected: {fileAction.TargetHash}, Got: {actualTargetHash}");
+                }
+            }
+            
+            // Replace original with patched
+            File.Delete(targetPath);
+            File.Move(tempOutputPath, targetPath);
+        }
+        
+        private async Task ApplyAddedFileAsync(string extractDir, string targetPath, FileAction fileAction)
+        {
+            Debug.WriteLine($"Adding new file: {fileAction.Path}");
+            
+            string sourcePath = Path.Combine(extractDir, fileAction.AddFile!.Replace('/', Path.DirectorySeparatorChar));
+            
+            if (!string.IsNullOrEmpty(fileAction.PackageFileHash))
+            {
+                string actualHash = CalculateFileHash(sourcePath);
+                if (!actualHash.Equals(fileAction.PackageFileHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new CryptographicException($"Corrupted file in package: {fileAction.AddFile}");
+                }
+            }
+            
+            if (!File.Exists(sourcePath))
+            {
+                throw new FileNotFoundException($"Added file not found in package: {fileAction.AddFile}");
+            }
+            
+            // Verify hash before copying
+            if (!string.IsNullOrEmpty(fileAction.TargetHash))
+            {
+                string actualHash = CalculateFileHash(sourcePath);
+                if (!actualHash.Equals(fileAction.TargetHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new CryptographicException($"Hash mismatch for added file {fileAction.Path}. Expected: {fileAction.TargetHash}, Got: {actualHash}");
+                }
+            }
+            
+            // Create directory if needed
+            string? directory = Path.GetDirectoryName(targetPath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            
+            await Task.Run(() => File.Copy(sourcePath, targetPath, true));
+        }
+        
+        private void ApplyRemovedFile(string targetPath, FileAction fileAction)
+        {
+            Debug.WriteLine($"Removing file: {fileAction.Path}");
+            
+            if (File.Exists(targetPath))
+            {
+                File.Delete(targetPath);
+            }
+            else
+            {
+                Debug.WriteLine($"  File already removed or doesn't exist: {fileAction.Path}");
+            }
         }
         
         public PatchyUpdater(string infoUrl, string publicKeyPem, Func<Task<bool>> confirmFullDownloadCallback)

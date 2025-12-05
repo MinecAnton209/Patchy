@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFramework>net8.0</TargetFramework>
@@ -6,7 +6,7 @@
         <Nullable>enable</Nullable>
 
         <PackageId>Patchy</PackageId>
-        <Version>0.2.4</Version>
+        <Version>1.0.0</Version>
         <Authors>MinecAnton209</Authors>
         <Company>MinecAnton209</Company>
         <Description>A simple, secure, ECDsa-based self-updater library for .NET applications.</Description>
@@ -19,7 +19,6 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <None Include="$(MSBuildProjectDirectory)\..\README.md" Pack="true" PackagePath="\"/>
         <PackageReference Include="BsDiff" Version="1.1.0" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     </ItemGroup>
