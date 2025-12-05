@@ -150,7 +150,12 @@ Optional configuration for `create-update-package`:
   "Changes": [
     "Fixed critical bug",
     "Added new feature"
-  ]
+  ],
+  "RestartRequired": true,
+  "Critical": false,
+  "InstallerFile": "Dist/Setup.exe",
+  "InstallerArguments": "/silent",
+  "FullPackageFile": "Full.zip"
 }
 ```
 
@@ -182,6 +187,16 @@ public class UpdatePackageManifest
     public long FromVersionId { get; set; }
     public string ReleaseName { get; set; }
     public List<string> Changes { get; set; }
+    
+    // New Flags
+    public bool RestartRequired { get; set; }     // Should app restart after update?
+    public bool Critical { get; set; }            // Is this a security/critical update?
+
+    // Optional Fallbacks
+    public string FallbackInstallerFile { get; set; }      // Path to embedded installer
+    public string FallbackInstallerArguments { get; set; } // Arguments for installer
+    public string FullPackageFile { get; set; }            // Name of standalone full zip
+    
     public List<FileAction> Files { get; set; }
     public string Signature { get; set; }
 }
@@ -192,6 +207,7 @@ public class FileAction
     public string Action { get; set; }      // "modified", "added", "removed"
     public string PatchFile { get; set; }   // Path to patch file (modified)
     public string AddFile { get; set; }     // Path to new file (added)
+    public string PackageFileHash { get; set; } // Hash of the file in the package
     public string SourceHash { get; set; }  // SHA256 of original file
     public string TargetHash { get; set; }  // SHA256 of target file
 }

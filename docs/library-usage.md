@@ -57,6 +57,14 @@ try
     if (remoteManifest.VersionId > currentVersionId)
     {
         Console.WriteLine("Update available!");
+        if (remoteManifest.Critical)
+        {
+             Console.WriteLine("This is a CRITICAL update.");
+        }
+        if (remoteManifest.FallbackInstallerFile != null)
+        {
+             Console.WriteLine("Fallback installer available.");
+        }
     }
 }
 catch (CryptographicException ex)

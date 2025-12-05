@@ -46,6 +46,28 @@ Patchy.Tool.exe create-update-package <old_dir> <new_dir> <output_dir> <private_
 Patchy.Tool.exe create-update-package ./v1.0 ./v1.1 ./release privateKey.pem config.json
 ```
 
+**Configuration File (`config.json`):**
+
+```json
+{
+  "NewVersionId": 1733421600,
+  "Version": "1.1.0",
+  "ReleaseName": "Important Update",
+  "RestartRequired": true,
+  "Critical": false,
+  "InstallerFile": "Setup.exe",
+  "InstallerArguments": "/silent /update",
+  "FullPackageFile": "Full.zip"
+}
+```
+
+**Fields:**
+- `RestartRequired`: (bool) Hints if app needs restart.
+- `Critical`: (bool) Hints if update is mandatory.
+- `InstallerFile`: (string) Path to an installer executable to include as fallback.
+- `InstallerArguments`: (string) Arguments to pass to the fallback installer.
+- `FullPackageFile`: (string) Name of the standalone zip of the new version to generate (optional).
+
 ---
 
 ### `prepare-release` (Legacy/Full Update)

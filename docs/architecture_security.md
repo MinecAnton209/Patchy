@@ -25,6 +25,12 @@ Every file action in the update package includes a SHA256 hash.
 - **Source Hash**: Before applying a binary patch to a file, the *current local file's* hash is checked. If it doesn't match the expected source hash, the patch is aborted (prevents corruption if the user modified local files).
 - **Target Hash**: After applying a patch or downloading a new file, the *resulting file's* hash is checked.
 
+### 3. Fallback Components Security
+If a fallback installer or full package is used:
+- Their hashes (`FallbackInstallerHash`, `FullPackageHash`) are included in the signed manifest.
+- The updater MUST verify these hashes after extraction and before execution.
+- This ensures the fallback installer hasn't been swapped by an attacker.
+
 ## Delta Update Mechanism (bsdiff)
 
 Patchy uses **bsdiff** (binary suffix diff) for efficient delta updates.

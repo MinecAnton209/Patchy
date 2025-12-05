@@ -14,6 +14,24 @@ namespace Patchy.Models
         public string ReleaseName { get; set; } = string.Empty;
         public List<string> Changes { get; set; } = new();
         public List<FileAction> Files { get; set; } = new();
+
+        public bool RestartRequired { get; set; } = true;
+        public bool Critical { get; set; } = false;
+
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FallbackInstallerFile { get; set; }
+        
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FallbackInstallerHash { get; set; }
+        
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FallbackInstallerArguments { get; set; }
+
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FullPackageFile { get; set; }
+
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? FullPackageHash { get; set; }
         
         [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
         public string? Signature { get; set; }

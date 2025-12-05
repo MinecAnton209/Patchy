@@ -600,6 +600,54 @@ public class Program
             
             Console.WriteLine($"\nSummary: {patchCount} modified, {addCount} added, {removeCount} removed, {unchangedCount} unchanged");
             
+            // Handle Fallback Installer
+            string? fallbackInstallerFile = null;
+            string? fallbackInstallerHash = null;
+            string? fallbackInstallerArgs = null;
+            
+            if (config != null && !string.IsNullOrEmpty(config.InstallerFile))
+            {
+                 if (File.Exists(config.InstallerFile))
+                 {
+                     string installerName = Path.GetFileName(config.InstallerFile);
+                     // Create 'installer' subdirectory in package
+                     string installerDir = Path.Combine(tempDir, "installer");
+                     Directory.CreateDirectory(installerDir);
+                     
+                     string destPath = Path.Combine(installerDir, installerName);
+                     File.Copy(config.InstallerFile, destPath, true);
+                     
+                     fallbackInstallerFile = "installer/" + installerName;
+                     fallbackInstallerHash = CalculateFileHash(destPath);
+                     fallbackInstallerArgs = config.InstallerArguments;
+                     Console.WriteLine($"  [INSTALLER] Added fallback installer: {installerName}");
+                 }
+                 else
+                 {
+                     Console.WriteLine($"  [WARNING] Installer file specified in config not found: {config.InstallerFile}");
+                 }
+            }
+
+            // Handle Full Package (Standalone ZIP of new version)
+            string? fullPackageFile = null;
+            string? fullPackageHash = null;
+
+            if (config != null && !string.IsNullOrEmpty(config.FullPackageFile))
+            {
+                string fullPackageName = config.FullPackageFile; // e.g., "Full.zip"
+                string fullPackagePath = Path.Combine(outputDir, fullPackageName);
+                
+                Console.WriteLine($"  [FULL] Creating full package: {fullPackagePath}");
+                if (File.Exists(fullPackagePath)) File.Delete(fullPackagePath);
+                
+                // Create ZIP from newDir
+                ZipFile.CreateFromDirectory(newDir, fullPackagePath, CompressionLevel.Optimal, false);
+                
+                fullPackageFile = fullPackageName;
+                fullPackageHash = CalculateFileHash(fullPackagePath);
+                Console.WriteLine($"    Hash: {fullPackageHash}");
+            }
+
             // Generate manifest
             var manifest = new UpdatePackageManifest
             {
@@ -608,6 +656,17 @@ public class Program
                 FromVersionId = config?.FromVersionId ?? 0,
                 ReleaseName = config?.ReleaseName ?? "Update Package",
                 Changes = config?.Changes ?? new List<string>(),
+                
+                RestartRequired = config?.RestartRequired ?? true,
+                Critical = config?.Critical ?? false,
+                
+                FallbackInstallerFile = fallbackInstallerFile,
+                FallbackInstallerHash = fallbackInstallerHash,
+                FallbackInstallerArguments = fallbackInstallerArgs,
+                
+                FullPackageFile = fullPackageFile,
+                FullPackageHash = fullPackageHash,
+                
                 Files = fileActions
             };
             
