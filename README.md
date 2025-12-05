@@ -1,4 +1,17 @@
-﻿The library supports two update strategies:
+﻿# Patchy
+
+[![NuGet Version](https://img.shields.io/nuget/v/Patchy.svg)](https://www.nuget.org/packages/Patchy/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Stars](https://img.shields.io/github/stars/MinecAnton209/Patchy?style=social)](https://github.com/MinecAnton209/Patchy)
+[![Issues](https://img.shields.io/github/issues/MinecAnton209/Patchy)](https://github.com/MinecAnton209/Patchy/issues)
+
+A secure, ECDsa-based self-updater library for .NET applications with support for file-level binary patching.
+
+## Overview
+
+Patchy provides a secure way to deliver updates to your users. It ensures that update information is authentic (signed by the developer) and that update files are integral (not corrupted or tampered with).
+
+The library supports two update strategies:
 - **Full package updates**: Replace the entire application with a new version
 - **File-level delta updates**: Patch only modified files using bsdiff binary diffing
 
