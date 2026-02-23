@@ -133,9 +133,13 @@ namespace Patchy
             });
         }
         
-        public async Task PerformUpdateAsync(string currentVersionDirectory, long currentVersionId)
+        public async Task PerformUpdateAsync(string currentVersionDirectory, long currentVersionId, IProgress<double>? progress = null, IProgress<string>? status = null)
         {
+            status?.Report("Initialization...");
+            progress?.Report(0);
+            
             Debug.WriteLine("Downloading and verifying release manifest...");
+            status?.Report("Getting updates...");
             var manifest = await CheckForSimplifiedUpdateAsync();
 
             if (manifest.VersionId <= currentVersionId)
@@ -150,6 +154,8 @@ namespace Patchy
             string updateMode;
 
             Debug.WriteLine("Creating archive of the current version...");
+            status?.Report("Preparing local files...");
+            progress?.Report(5);
             string oldArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
             try
             {
@@ -187,16 +193,32 @@ namespace Patchy
                 if (File.Exists(oldArchiveFile)) File.Delete(oldArchiveFile);
             }
 
-            Debug.WriteLine("Downloading updater components...");
             string installerUrl = manifest.PatchUrlBase + manifest.InstallerFile;
             string packageUrl = manifest.PatchUrlBase + packageToDownload;
 
-            Task<string> downloadInstallerTask = DownloadFileAsync(installerUrl, manifest.InstallerFile);
-            Task<string> downloadPackageTask = DownloadFileAsync(packageUrl, packageToDownload);
-            await Task.WhenAll(downloadInstallerTask, downloadPackageTask);
+            Debug.WriteLine("Downloading updater components...");
+            status?.Report("Downloading installer components...");
             
-            string installerPath = downloadInstallerTask.Result;
-            string packagePath = downloadPackageTask.Result;
+            string installerPath = await DownloadFileWithProgressAsync(
+                installerUrl, 
+                manifest.InstallerFile, 
+                progress, 
+                startProgress: 10, 
+                endProgress: 20
+            );
+            
+            status?.Report("Downloading update files...");
+            
+            string packagePath = await DownloadFileWithProgressAsync(
+                packageUrl, 
+                packageToDownload, 
+                progress, 
+                startProgress: 20, 
+                endProgress: 90
+            );
+            
+            status?.Report("Integrity check...");
+            progress?.Report(95);
             
             try
             {
@@ -223,6 +245,9 @@ namespace Patchy
                     Debug.WriteLine("Update package hash is VALID.");
                 }
                 Debug.WriteLine("All component hashes are VALID.");
+                
+                progress?.Report(100);
+                status?.Report("Restarting...");
 
                 int currentProcessId = Process.GetCurrentProcess().Id;
                 string arguments = $"{updateMode} \"{packagePath}\" /pid {currentProcessId} /path \"{currentVersionDirectory}\"";
@@ -253,6 +278,44 @@ namespace Patchy
             }
             return tempPath;
         }*/
+
+        private async Task<string> DownloadFileWithProgressAsync(string url, string fileName, IProgress<double>? progressReporter, double startProgress, double endProgress)
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), fileName);
+
+            using (var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+            {
+                response.EnsureSuccessStatusCode();
+                
+                long? totalBytes = response.Content.Headers.ContentLength;
+
+                using (var contentStream = await response.Content.ReadAsStreamAsync())
+                {
+                    using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+                    {
+                        var buffer = new byte[8192];
+                        long totalRead = 0;
+                        int bytesRead;
+
+                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                        {
+                            await fileStream.WriteAsync(buffer, 0, bytesRead);
+
+                            if (progressReporter != null && totalBytes.HasValue)
+                            {
+                                totalRead += bytesRead;
+                                double filePercentage = (double)totalRead / totalBytes.Value;
+                                double totalProgress = startProgress + (filePercentage * (endProgress - startProgress));
+                                
+                                progressReporter.Report(totalProgress);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return tempPath;
+        }
         
         private async Task<string> DownloadFileAsync(string url, string fileName)
         {

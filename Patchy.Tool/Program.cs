@@ -435,19 +435,40 @@ public class Program
         Console.WriteLine("--- Testing Full Update Cycle ---");
     
         string publicKey = File.ReadAllText(publicKeyPath);
-        var updater = new PatchyUpdater(infoJsonUrl, publicKey, () => Task.FromResult(true));
+        var updater = new PatchyUpdater(infoJsonUrl, publicKey, () => 
+        {
+            Console.WriteLine("[PROMPT] User confirmation requested. Auto-answering YES.");
+            return Task.FromResult(true);
+        });
         
         long testCurrentVersionId = 1; 
     
         try
         {
-            await updater.PerformUpdateAsync(currentVersionDir, testCurrentVersionId);
+            var statusReporter = new Progress<string>(status =>
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"[STATUS] {status}");
+                Console.ResetColor();
+            });
+
+            var progressReporter = new Progress<double>(percent =>
+            {
+                Console.Write($"\r[PROGRESS] {percent:0.0}%");
+            });
+            
+            Console.WriteLine($"Starting update process...");
+            
+            await updater.PerformUpdateAsync(currentVersionDir, testCurrentVersionId, progressReporter, statusReporter);
+            
+            Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("\nUpdate cycle completed successfully!");
             Console.ResetColor();
         }
         catch (Exception ex)
         {
+            Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"\nAn error occurred during update: {ex.Message}");
             Console.ResetColor();
