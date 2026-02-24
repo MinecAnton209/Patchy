@@ -395,28 +395,33 @@ namespace Patchy
         public async Task<SinglePatchManifest> CheckForSimplifiedUpdateAsync()
         {
             string jsonContent = await _httpClient.GetStringAsync(_infoUrl);
-            var manifest = JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent);
+            var jObj = Newtonsoft.Json.Linq.JObject.Parse(jsonContent);
+            var signature = jObj["Signature"]?.ToString();
 
-            if (manifest == null || string.IsNullOrEmpty(manifest.Signature))
-            {
-                throw new InvalidDataException("Update manifest is malformed or signature is missing.");
-            }
-
-            var signature = manifest.Signature;
-            manifest.Signature = null;
+            if (string.IsNullOrEmpty(signature))
+                throw new InvalidDataException("Signature is missing in manifest.");
             
-            string dataToVerify = JsonConvert.SerializeObject(manifest, Formatting.Indented);
+            jObj.Remove("Signature");
+            
+            var serializerSettings = new JsonSerializerSettings
+            {
+                Formatting = Formatting.Indented,
+                DateTimeZoneHandling = DateTimeZoneHandling.Utc,
+                StringEscapeHandling = StringEscapeHandling.Default
+            };
+            
+            string dataToVerify = JsonConvert.SerializeObject(jObj, serializerSettings);
+            
             dataToVerify = dataToVerify.Replace("\r\n", "\n");
-
-            manifest.Signature = signature; 
-
+            
             if (!VerifySignature(dataToVerify, signature))
             {
-                throw new CryptographicException("SIGNATURE VERIFICATION FAILED! The update manifest has been tampered with.");
+                Debug.WriteLine($"Data used for verify:\n{dataToVerify}");
+                throw new CryptographicException("SIGNATURE VERIFICATION FAILED!");
             }
 
             Debug.WriteLine("Manifest signature is VALID.");
-            return manifest;
+            return JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent);
         }
 
         /// <summary>

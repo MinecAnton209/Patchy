@@ -403,7 +403,8 @@ namespace Patchy.Tool
 
             // Re-insert signature into JSON and save
             jObj["Signature"] = signature;
-            await File.WriteAllTextAsync(manifestPath, jObj.ToString(Formatting.Indented), Utf8NoBom);
+            string finalJson = jObj.ToString(Formatting.Indented).Replace("\r\n", "\n");
+            await File.WriteAllTextAsync(manifestPath, finalJson, Utf8NoBom);
             
             Console.WriteLine("Manifest signed successfully!");
         }
