@@ -2,799 +2,409 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using BsDiff;
-using ICSharpCode.SharpZipLib.Tar;
 using Newtonsoft.Json;
-using Patchy;
+using Newtonsoft.Json.Linq;
 using Patchy.Models;
 
-public class Program
+namespace Patchy.Tool
 {
-    public static async Task Main(string[] args)
+    public class Program
     {
-        if (args.Length == 0)
-        {
-            PrintUsage();
-            return;
-        }
+        // Use UTF8 without BOM to avoid cross-platform signature verification issues.
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
-        string command = args[0].ToLower();
-        try
+        /// <summary>
+        /// Main entry point for the Patchy.Tool CLI.
+        /// Parses commands and executes the corresponding update building logic.
+        /// </summary>
+        public static async Task Main(string[] args)
         {
-            switch (command)
+            if (args.Length == 0)
             {
-                case "generate-keys":
-                    GenerateKeys();
-                    break;
-                case "sign":
-                    if (args.Length < 4) 
-                    {
-                        Console.WriteLine("Error: Missing arguments for 'sign' command.");
+                PrintUsage();
+                return;
+            }
+
+            string command = args[0].ToLower();
+            try
+            {
+                switch (command)
+                {
+                    case "generate-keys":
+                        await GenerateKeysAsync();
+                        break;
+                        
+                    case "create-patch":
+                        if (args.Length < 4) { PrintUsage(); return; }
+                        await CreatePatchAsync(args[1], args[2], args[3]);
+                        break;
+                        
+                    case "hash":
+                        if (args.Length < 2) { Console.WriteLine("Error: Missing file path."); return; }
+                        Console.WriteLine(await CalculateFileHashAsync(args[1]));
+                        break;
+                        
+                    case "create-update-package":
+                        if (args.Length < 4)
+                        {
+                            Console.WriteLine("Error: Missing arguments for 'create-update-package' command.");
+                            PrintUsage();
+                            return;
+                        }
+                        string privateKeyPath = args.Length > 4 ? args[4] : "privateKey.pem";
+                        string? configPath = args.Length > 5 ? args[5] : null;
+                        await CreateUpdatePackageAsync(args[1], args[2], args[3], privateKeyPath, configPath);
+                        break;
+                        
+                    default:
+                        Console.WriteLine($"Error: Unknown command '{command}' or command was removed.");
                         PrintUsage();
-                        return;
-                    }
-                    SignRelease(args[1], args[2], args[3]);
-                    break;
-                case "create-patch":
-                    if (args.Length < 4) { PrintUsage(); return; }
-                    CreatePatch(args[1], args[2], args[3]);
-                    break;
-                case "apply-patch":
-                    if (args.Length < 4)
-                    {
-                        Console.WriteLine("Error: Missing arguments for 'apply-patch' command.");
-                        PrintUsage();
-                        return;
-                    }
-                    await ApplyPatchTest(args[1], args[2], args[3]);
-                    break;
-                case "update-check":
-                    if (args.Length < 3)
-                    {
-                        Console.WriteLine("Error: Missing arguments for 'update-check' command.");
-                        PrintUsage();
-                        return;
-                    }
-                    await RunUpdateCheck(args[1], args[2]);
-                    break;
-                case "prepare-release":
-                    if (args.Length < 7)
-                    {
-                        Console.WriteLine("Error: Missing arguments for 'prepare-release' command.");
-                        PrintUsage();
-                        return;
-                    }
-                    PrepareRelease(args[1], args[2], args[3], args[4], args[5], args[6]);
-                    break;
-                case "test-update":
-                    if (args.Length < 4) { PrintUsage(); return; }
-                    await TestFullUpdate(args[1], args[2], args[3]);
-                    break;
-                case "hash":
-                    if (args.Length < 2) { Console.WriteLine("Error: Missing file path."); return; }
-                    Console.WriteLine(CalculateFileHash(args[1]));
-                    break;
-                case "create-update-package":
-                    if (args.Length < 5)
-                    {
-                        Console.WriteLine("Error: Missing arguments for 'create-update-package' command.");
-                        PrintUsage();
-                        return;
-                    }
-                    CreateUpdatePackage(args[1], args[2], args[3], args[4], args.Length > 5 ? args[5] : null);
-                    break;
-                default:
-                    Console.WriteLine($"Error: Unknown command '{command}'");
-                    PrintUsage();
-                    break;
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"\n[ERROR] An error occurred: {ex.Message}");
+                Console.ResetColor();
             }
         }
-        catch (Exception ex)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"An error occurred: {ex.Message}");
-            Console.ResetColor();
-        }
-    }
 
-    /// <summary>
-    /// Generates a new ECDsa private/public key pair and saves them to PEM files.
-    /// </summary>
-    private static void GenerateKeys()
-    {
-        Console.WriteLine("Generating ECDsa key pair using curve nistP256...");
-        using (var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+        /// <summary>
+        /// Prints the usage instructions for the command-line tool.
+        /// </summary> 
+        private static void PrintUsage()
         {
-            // Export the private key
+            Console.WriteLine("Patchy.Tool - A utility for creating and signing binary patch releases.");
+            Console.WriteLine("\nUsage: Patchy.Tool.exe <command> [arguments]\n");
+            
+            Console.WriteLine("--- Main Commands ---");
+            Console.WriteLine("  create-update-package <old_dir> <new_dir> <output_dir> [private_key_path] [config.json]");
+            Console.WriteLine("    Creates a file-level update package with per-file patches.");
+            Console.WriteLine("    Output: update.pkg (ZIP with meta.json, diffs/, add/)\n");
+
+            Console.WriteLine("--- Utility Commands ---");
+            Console.WriteLine("  generate-keys");
+            Console.WriteLine("    Generates a new private/public key pair (privateKey.pem, publicKey.pem).\n");
+            Console.WriteLine("  create-patch <old_file> <new_file> <patch_output>");
+            Console.WriteLine("    Creates a single binary patch from an old file to a new file.");
+            Console.WriteLine("  hash <file_path>");
+            Console.WriteLine("    Calculates the SHA256 hash of a file.\n");
+        }
+
+        /// <summary>
+        /// Generates a new ECDsa private/public key pair and saves them to PEM files.
+        /// </summary>
+        private static async Task GenerateKeysAsync()
+        {
+            Console.WriteLine("Generating ECDsa key pair using curve nistP256...");
+            using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            
+            // Export and save the private key
             string privateKeyPem = ecdsa.ExportECPrivateKeyPem();
-            File.WriteAllText("privateKey.pem", privateKeyPem);
+            await File.WriteAllTextAsync("privateKey.pem", privateKeyPem, Utf8NoBom);
             Console.WriteLine("Private key saved to privateKey.pem (KEEP THIS SECRET!)");
 
-            // Export the public key
+            // Export and save the public key
             string publicKeyPem = ecdsa.ExportSubjectPublicKeyInfoPem();
-            File.WriteAllText("publicKey.pem", publicKeyPem);
+            await File.WriteAllTextAsync("publicKey.pem", publicKeyPem, Utf8NoBom);
             Console.WriteLine("Public key saved to publicKey.pem (Embed this in your application)");
         }
-    }
 
-    /// <summary>
-    /// Calculates the hash of the update file, updates the info.json, and signs it.
-    /// </summary>
-    /// <param name="infoJsonPath">Path to the info.json file.</param>
-    /// <param name="privateKeyPath">Path to the privateKey.pem file.</param>
-    /// <param name="updateFilePath">Path to the update package (e.g., Update.zip).</param>
-    private static void SignRelease(string infoJsonPath, string privateKeyPath, string updateFilePath)
-    {
-        if (!File.Exists(updateFilePath))
+        /// <summary>
+        /// Helper method to asynchronously calculate the SHA256 hash of a file.
+        /// </summary>
+        /// <param name="filePath">Path to the file.</param>
+        /// <returns>A lowercase hex string of the hash.</returns>
+        private static async Task<string> CalculateFileHashAsync(string filePath)
         {
-            throw new FileNotFoundException("Update file not found.", updateFilePath);
-        }
-        if (!File.Exists(infoJsonPath))
-        {
-            throw new FileNotFoundException("Info JSON file not found.", infoJsonPath);
-        }
-        if (!File.Exists(privateKeyPath))
-        {
-            throw new FileNotFoundException("Private key file not found.", privateKeyPath);
+            using var sha256 = SHA256.Create();
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
+            var hashBytes = await sha256.ComputeHashAsync(stream);
+            return Convert.ToHexString(hashBytes).ToLowerInvariant();
         }
 
-        // 1. Calculate the hash of the update file
-        Console.WriteLine($"Calculating ECDsa hash for '{updateFilePath}'...");
-        string fileHash = CalculateFileHash(updateFilePath);
-        Console.WriteLine($"Calculated Hash: {fileHash}");
-
-        // 2. Read the info.json, update the hash, and clear any old signature
-        Console.WriteLine($"Updating '{infoJsonPath}' with new hash...");
-        string jsonContent = File.ReadAllText(infoJsonPath);
-        var updateInfo = JsonConvert.DeserializeObject<UpdateInfo>(jsonContent);
-        if (updateInfo == null) throw new Exception("Failed to parse info.json");
-        
-        updateInfo.FileHash = fileHash;
-        updateInfo.Signature = null; 
-        
-        // 3. Prepare the data for signing
-        string dataToSign = JsonConvert.SerializeObject(updateInfo, Formatting.Indented);
-        
-        Console.WriteLine($"Signing with '{privateKeyPath}'...");
-        using (var ecdsa = ECDsa.Create())
+        /// <summary>
+        /// Creates a bsdiff patch file asynchronously.
+        /// </summary>
+        private static async Task CreatePatchAsync(string oldFilePath, string newFilePath, string patchFilePath)
         {
-            ecdsa.ImportFromPem(File.ReadAllText(privateKeyPath));
-            var dataBytes = Encoding.UTF8.GetBytes(dataToSign);
-            var signatureBytes = ecdsa.SignData(dataBytes, HashAlgorithmName.SHA256);
-            string signature = Convert.ToBase64String(signatureBytes);
+            Console.WriteLine($"  -> Creating patch: '{Path.GetFileName(patchFilePath)}'...");
+            if (!File.Exists(oldFilePath)) throw new FileNotFoundException("Old file not found.", oldFilePath);
+            if (!File.Exists(newFilePath)) throw new FileNotFoundException("New file not found.", newFilePath);
 
-            // 4. Add the new signature and save the final file
-            updateInfo.Signature = signature;
-            string finalJson = JsonConvert.SerializeObject(updateInfo, Formatting.Indented);
-            File.WriteAllText(infoJsonPath, finalJson);
-
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Release info processed and signed successfully!");
-            Console.WriteLine($"New Signature: {signature}");
-            Console.ResetColor();
-        }
-    }
-
-    /// <summary>
-    /// Helper method to calculate the SHA256 hash of a file.
-    /// </summary>
-    /// <param name="filePath">Path to the file.</param>
-    /// <returns>A lowercase hex string of the hash.</returns>
-    private static string CalculateFileHash(string filePath)
-    {
-        using (var sha256 = SHA256.Create())
-        {
-            using (var stream = File.OpenRead(filePath))
+            string? directory = Path.GetDirectoryName(patchFilePath);
+            if (!string.IsNullOrEmpty(directory))
             {
-                var hashBytes = sha256.ComputeHash(stream);
-                return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                Directory.CreateDirectory(directory);
             }
-        }
-    }
 
-    /// <summary>
-    /// Simulates the client-side update check process for testing.
-    /// </summary>
-    /// <param name="infoJsonUrl">The URL to the remote info.json file.</param>
-    /// <param name="publicKeyPath">Path to the local publicKey.pem file.</param>
-    private static async Task RunUpdateCheck(string infoJsonUrl, string publicKeyPath)
-    {
-        Console.WriteLine($"--- Running Example Update Check ---");
-        Console.WriteLine($"Info URL: {infoJsonUrl}");
-        Console.WriteLine($"Public Key: {publicKeyPath}");
+            // BsDiff requires data in memory to build the suffix tree.
+            // Using Async for non-blocking IO reads.
+            byte[] oldFileBytes = await File.ReadAllBytesAsync(oldFilePath);
+            byte[] newFileBytes = await File.ReadAllBytesAsync(newFilePath);
 
-        string publicKey = File.ReadAllText(publicKeyPath);
-        var updater = new PatchyUpdater(infoJsonUrl, publicKey, () => Task.FromResult(true));
-        
-        long currentVersionId = 2025091400; // Example: current version of the application
-        Console.WriteLine($"Current application version ID: {currentVersionId}");
-
-        try
-        {
-            Console.WriteLine("Checking for updates...");
-            UpdateInfo updateInfo = await updater.CheckForUpdatesAsync();
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Update info signature is VALID.");
-            Console.ResetColor();
-            Console.WriteLine($"Latest Version: {updateInfo.Version} ({updateInfo.VersionId})");
-            Console.WriteLine($"Release Name: {updateInfo.ReleaseName}");
-
-            if (updateInfo.VersionId > currentVersionId)
-            {
-                Console.WriteLine("New version available! Downloading...");
-                string downloadedFile = await updater.DownloadUpdateAsync(updateInfo);
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("Download complete and file hash is VALID.");
-                Console.ResetColor();
-                Console.WriteLine($"Update package saved to: {downloadedFile}");
-                Console.WriteLine("Ready to apply the update.");
-                // In a real application, you would now trigger the self-update mechanism
-            }
-            else
-            {
-                Console.WriteLine("You are already on the latest version.");
-            }
-        }
-        catch (CryptographicException ex)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"SECURITY ALERT: {ex.Message}");
-            Console.ResetColor();
-        }
-        catch (Exception ex)
-        {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"Failed to check for updates: {ex.Message}");
-            Console.ResetColor();
-        }
-    }
-    
-    private static void CreatePatch(string oldFilePath, string newFilePath, string patchFilePath)
-    {
-        Console.WriteLine($"Creating patch from '{Path.GetFileName(oldFilePath)}' to '{Path.GetFileName(newFilePath)}'...");
-        if (!File.Exists(oldFilePath)) throw new FileNotFoundException("Old file not found.", oldFilePath);
-        if (!File.Exists(newFilePath)) throw new FileNotFoundException("New file not found.", newFilePath);
-
-        string? directory = Path.GetDirectoryName(patchFilePath);
-
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        var oldFileBytes = File.ReadAllBytes(oldFilePath);
-        var newFileBytes = File.ReadAllBytes(newFilePath);
-
-        using (var outputStream = File.Create(patchFilePath))
-        {
-            BinaryPatch.Create(oldFileBytes, newFileBytes, outputStream);
-        }
-        
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"Successfully created patch: {patchFilePath}");
-        Console.ResetColor();
-    }
-    
-    private static async Task ApplyPatchTest(string oldFilePath, string patchFilePath, string newFilePath)
-    {
-        Console.WriteLine($"Testing patch application...");
-        var updater = new PatchyUpdater("test_url", "test_key", () => Task.FromResult(true));
-        try
-        {
-            await updater.ApplyPatchAsync(oldFilePath, patchFilePath, newFilePath);
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Patch applied successfully!");
-            Console.ResetColor();
-        }
-        catch (Exception ex)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"An error occurred during patch application: {ex.Message}");
-            Console.ResetColor();
-        }
-    }
-    
-    private static void PrepareRelease(string oldDir, string newDir, string outputDir, string privateKeyPath, string configPath, string installerPath)
-    {
-        Console.WriteLine("--- Preparing New Release ---");
-        
-        Console.WriteLine($"Loading release configuration from '{configPath}'...");
-        if (!File.Exists(configPath)) throw new FileNotFoundException("Release config file not found.", configPath);
-        var releaseConfig = JsonConvert.DeserializeObject<ReleaseConfig>(File.ReadAllText(configPath));
-        if (releaseConfig == null) throw new Exception("Failed to parse release config file.");
-        
-        if (!Directory.Exists(oldDir)) throw new DirectoryNotFoundException($"Old version directory not found: {oldDir}");
-        if (!Directory.Exists(newDir)) throw new DirectoryNotFoundException($"New version directory not found: {newDir}");
-
-        if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
-        Directory.CreateDirectory(outputDir);
-
-        string? fullPackageHash = null;
-        if (!string.IsNullOrEmpty(releaseConfig.FullPackageFile))
-        {
-            Console.WriteLine($"Creating full release package '{releaseConfig.FullPackageFile}'...");
-            string fullPackagePath = Path.Combine(outputDir, releaseConfig.FullPackageFile);
-            System.IO.Compression.ZipFile.CreateFromDirectory(newDir, fullPackagePath);
-            fullPackageHash = CalculateFileHash(fullPackagePath);
-            Console.WriteLine("Full release package created successfully.");
-        }
-
-        string oldArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
-        string newArchiveFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".tar");
-        string patchFileName = "update.patch";
-        string patchFile = Path.Combine(outputDir, patchFileName);
-        
-        if (!File.Exists(installerPath)) throw new FileNotFoundException("Installer executable not found!", installerPath);
-    
-        string installerDestPath = Path.Combine(outputDir, releaseConfig.InstallerFile);
-        File.Copy(installerPath, installerDestPath, true);
-        string installerHash = CalculateFileHash(installerDestPath);
-        Console.WriteLine($"Installer '{releaseConfig.InstallerFile}' prepared with hash: {installerHash}");
-        
-        try
-        {
-            CreateTarArchive(oldDir, oldArchiveFile);
-            CreateTarArchive(newDir, newArchiveFile);
-            CreatePatch(oldArchiveFile, newArchiveFile, patchFile);
+            await using var outputStream = new FileStream(patchFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true);
             
-            Console.WriteLine("Generating release manifest (info.json)...");
-            var manifest = new SinglePatchManifest
+            // BsDiff is CPU intensive and synchronous, so we offload it to a background thread
+            await Task.Run(() => BinaryPatch.Create(oldFileBytes, newFileBytes, outputStream));
+        }
+
+        /// <summary>
+        /// Creates a file-level update package by comparing two directories.
+        /// Generates per-file bsdiff patches for modified files, copies new files, and builds a signed manifest.
+        /// </summary>
+        private static async Task CreateUpdatePackageAsync(string oldDir, string newDir, string outputDir, string privateKeyPath, string? configPath)
+        {
+            Console.WriteLine("--- Creating Update Package ---");
+            Console.WriteLine($"Old directory: {oldDir}");
+            Console.WriteLine($"New directory: {newDir}");
+            Console.WriteLine($"Output directory: {outputDir}");
+            
+            if (!Directory.Exists(oldDir)) throw new DirectoryNotFoundException($"Old directory not found: {oldDir}");
+            if (!Directory.Exists(newDir)) throw new DirectoryNotFoundException($"New directory not found: {newDir}");
+            if (!File.Exists(privateKeyPath)) throw new FileNotFoundException("Private key not found.", privateKeyPath);
+            
+            // 1. Load release configuration if provided
+            ReleaseConfig? config = null;
+            if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
             {
-                VersionId = releaseConfig.NewVersionId,
-                Version = releaseConfig.Version,
-                FromVersionId = releaseConfig.FromVersionId,
-                ReleaseName = releaseConfig.ReleaseName,
-                Changes = releaseConfig.Changes,
-                PatchUrlBase = releaseConfig.PatchUrlBase,
-                PatchFile = patchFileName,
-                PatchHash = CalculateFileHash(patchFile),
-                SourceArchiveHash = CalculateFileHash(oldArchiveFile),
-                TargetArchiveHash = CalculateFileHash(newArchiveFile),
+                string configContent = await File.ReadAllTextAsync(configPath, Utf8NoBom);
+                config = JsonConvert.DeserializeObject<ReleaseConfig>(configContent);
+                Console.WriteLine($"Loaded config from: {configPath}");
+            }
+            
+            // 2. Prepare output and temporary working directories
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+            Directory.CreateDirectory(outputDir);
+            
+            string tempDir = Path.Combine(Path.GetTempPath(), "patchy_" + Guid.NewGuid().ToString("N"));
+            string diffsDir = Path.Combine(tempDir, "diffs");
+            string addDir = Path.Combine(tempDir, "add");
+            Directory.CreateDirectory(diffsDir);
+            Directory.CreateDirectory(addDir);
+            
+            try
+            {
+                // 3. Scan directories for files
+                Console.WriteLine("\nScanning directories...");
+                var oldFiles = GetRelativeFiles(oldDir);
+                var newFiles = GetRelativeFiles(newDir);
                 
-                FullPackageFile = releaseConfig.FullPackageFile,
-                FullPackageHash = fullPackageHash,
-                InstallerFile = releaseConfig.InstallerFile,
-                InstallerFileHash = installerHash,
-            };
-            
-            string manifestPath = Path.Combine(outputDir, "info.json");
-            string json = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings { Formatting = Formatting.Indented, NullValueHandling = NullValueHandling.Ignore });
-            File.WriteAllText(manifestPath, json);
-            
-            SignSimplifiedManifest(manifestPath, privateKeyPath);
-        }
-        finally
-        {
-            Console.WriteLine("Cleaning up temporary files...");
-            if (File.Exists(oldArchiveFile)) File.Delete(oldArchiveFile);
-            if (File.Exists(newArchiveFile)) File.Delete(newArchiveFile);
-        }
-
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"--- Release prepared successfully in '{outputDir}' ---");
-        Console.ResetColor();
-    }
-    
-    private static void CreateTarArchive(string sourceDirectory, string tarFilePath)
-    {
-        using (FileStream fs = new FileStream(tarFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
-        using (TarOutputStream tarStream = new TarOutputStream(fs, System.Text.Encoding.UTF8))
-        {
-            var files = Directory.GetFiles(sourceDirectory, "*.*", SearchOption.AllDirectories);
-            Array.Sort(files);
-
-            foreach (string filename in files)
-            {
-                FileInfo fileInfo = new FileInfo(filename);
-            
-                string relativePath = Path.GetRelativePath(sourceDirectory, filename);
-            
-                TarEntry entry = TarEntry.CreateEntryFromFile(filename);
-                entry.Name = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-            
-                tarStream.PutNextEntry(entry);
-
-                using (FileStream inputFileStream = File.OpenRead(filename))
+                Console.WriteLine($"  Old: {oldFiles.Count} files");
+                Console.WriteLine($"  New: {newFiles.Count} files");
+                
+                var fileActions = new List<FileAction>();
+                int patchCount = 0, addCount = 0, removeCount = 0, unchangedCount = 0;
+                
+                // 4. Process all new or modified files
+                foreach (var relativePath in newFiles)
                 {
-                    inputFileStream.CopyTo(tarStream);
-                }
-            
-                tarStream.CloseEntry();
-            }
-        }
-    }
-    
-    private static void SignSimplifiedManifest(string manifestPath, string privateKeyPath)
-    {
-        Console.WriteLine($"Signing manifest '{manifestPath}'...");
-    
-        string jsonContent = File.ReadAllText(manifestPath);
-        var manifest = JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent);
-        if (manifest == null) throw new Exception("Failed to parse manifest file.");
-        
-        manifest.Signature = null;
-        string dataToSign = JsonConvert.SerializeObject(manifest, Formatting.Indented);
-        dataToSign = dataToSign.Replace("\r\n", "\n");
-        
-        using (var ecdsa = ECDsa.Create())
-        {
-            ecdsa.ImportFromPem(File.ReadAllText(privateKeyPath));
-            var dataBytes = Encoding.UTF8.GetBytes(dataToSign);
-            var signatureBytes = ecdsa.SignData(dataBytes, HashAlgorithmName.SHA256);
-            string signature = Convert.ToBase64String(signatureBytes);
+                    string oldFilePath = Path.Combine(oldDir, relativePath);
+                    string newFilePath = Path.Combine(newDir, relativePath);
+                    string newHash = await CalculateFileHashAsync(newFilePath);
+                    
+                    // Create a safe flat filename for storing inside the package zip
+                    string safeFileName = relativePath.Replace(Path.DirectorySeparatorChar, '_').Replace('/', '_');
 
-            manifest.Signature = signature;
-            string finalJson = JsonConvert.SerializeObject(manifest, Formatting.Indented);
-            File.WriteAllText(manifestPath, finalJson);
-    
-            Console.WriteLine("Manifest signed successfully!");
-        }
-    }
-    
-    private static async Task TestFullUpdate(string currentVersionDir, string infoJsonUrl, string publicKeyPath)
-    {
-        Console.WriteLine("--- Testing Full Update Cycle ---");
-    
-        string publicKey = File.ReadAllText(publicKeyPath);
-        var updater = new PatchyUpdater(infoJsonUrl, publicKey, () => 
-        {
-            Console.WriteLine("[PROMPT] User confirmation requested. Auto-answering YES.");
-            return Task.FromResult(true);
-        });
-        
-        long testCurrentVersionId = 1; 
-    
-        try
-        {
-            var statusReporter = new Progress<string>(status =>
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine($"[STATUS] {status}");
-                Console.ResetColor();
-            });
-
-            var progressReporter = new Progress<double>(percent =>
-            {
-                Console.Write($"\r[PROGRESS] {percent:0.0}%");
-            });
-            
-            Console.WriteLine($"Starting update process...");
-            
-            await updater.PerformUpdateAsync(currentVersionDir, testCurrentVersionId, progressReporter, statusReporter);
-            
-            Console.WriteLine();
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("\nUpdate cycle completed successfully!");
-            Console.ResetColor();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine();
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"\nAn error occurred during update: {ex.Message}");
-            Console.ResetColor();
-        }
-    }
-
-    /// <summary>
-    /// Prints the usage instructions for the command-line tool.
-    /// </summary> 
-    private static void PrintUsage()
-    {
-        Console.WriteLine("Patchy.Tool - A utility for creating and signing binary patch releases.");
-        Console.WriteLine("\nUsage: Patchy.Tool.exe <command> [arguments]\n");
-        
-        Console.WriteLine("--- Main Commands ---");
-        Console.WriteLine("  create-update-package <old_dir> <new_dir> <output_dir> <private_key> [config.json]");
-        Console.WriteLine("    Creates a file-level update package with per-file patches.");
-        Console.WriteLine("    Output: update.pkg (ZIP with meta.json, diffs/, add/)\n");
-
-        Console.WriteLine("--- Utility Commands ---");
-        Console.WriteLine("  generate-keys");
-        Console.WriteLine("    Generates a new private/public key pair (privateKey.pem, publicKey.pem).\n");
-
-        Console.WriteLine("--- Testing Commands ---");
-        Console.WriteLine("  create-patch <old_file> <new_file> <patch_output>");
-        Console.WriteLine("    Creates a single binary patch from an old file to a new file.");
-        Console.WriteLine("  apply-patch <old_file> <patch_file> <new_file_output>");
-        Console.WriteLine("    Applies a single binary patch to an old file to create the new file.");
-        Console.WriteLine("  hash <file_path>");
-        Console.WriteLine("    Calculates the SHA256 hash of a file.\n");
-    }
-    
-    /// <summary>
-    /// Creates a file-level update package by comparing two directories.
-    /// Generates per-file bsdiff patches for modified files.
-    /// </summary>
-    private static void CreateUpdatePackage(string oldDir, string newDir, string outputDir, string privateKeyPath, string? configPath)
-    {
-        Console.WriteLine("--- Creating Update Package ---");
-        Console.WriteLine($"Old directory: {oldDir}");
-        Console.WriteLine($"New directory: {newDir}");
-        Console.WriteLine($"Output directory: {outputDir}");
-        
-        if (!Directory.Exists(oldDir)) throw new DirectoryNotFoundException($"Old directory not found: {oldDir}");
-        if (!Directory.Exists(newDir)) throw new DirectoryNotFoundException($"New directory not found: {newDir}");
-        if (!File.Exists(privateKeyPath)) throw new FileNotFoundException("Private key not found.", privateKeyPath);
-        
-        // Load config if provided
-        ReleaseConfig? config = null;
-        if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
-        {
-            config = JsonConvert.DeserializeObject<ReleaseConfig>(File.ReadAllText(configPath));
-            Console.WriteLine($"Loaded config from: {configPath}");
-        }
-        
-        // Create output structure
-        if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
-        Directory.CreateDirectory(outputDir);
-        
-        string tempDir = Path.Combine(Path.GetTempPath(), "patchy_" + Guid.NewGuid().ToString("N"));
-        string diffsDir = Path.Combine(tempDir, "diffs");
-        string addDir = Path.Combine(tempDir, "add");
-        Directory.CreateDirectory(diffsDir);
-        Directory.CreateDirectory(addDir);
-        
-        try
-        {
-            // Scan directories
-            Console.WriteLine("\nScanning directories...");
-            var oldFiles = GetRelativeFiles(oldDir);
-            var newFiles = GetRelativeFiles(newDir);
-            
-            Console.WriteLine($"  Old: {oldFiles.Count} files");
-            Console.WriteLine($"  New: {newFiles.Count} files");
-            
-            var fileActions = new List<FileAction>();
-            int patchCount = 0, addCount = 0, removeCount = 0, unchangedCount = 0;
-            
-            // Process new/modified files
-            foreach (var relativePath in newFiles)
-            {
-                string oldFilePath = Path.Combine(oldDir, relativePath);
-                string newFilePath = Path.Combine(newDir, relativePath);
-                string newHash = CalculateFileHash(newFilePath);
-
-                if (oldFiles.Contains(relativePath))
-                {
-                    string oldHash = CalculateFileHash(oldFilePath);
-
-                    if (oldHash.Equals(newHash, StringComparison.OrdinalIgnoreCase))
+                    if (oldFiles.Contains(relativePath))
                     {
-                        unchangedCount++;
-                        continue;
+                        string oldHash = await CalculateFileHashAsync(oldFilePath);
+
+                        if (string.Equals(oldHash, newHash, StringComparison.OrdinalIgnoreCase))
+                        {
+                            unchangedCount++;
+                            continue; // File is unchanged
+                        }
+
+                        // File changed - generate binary patch
+                        string patchFileName = safeFileName + ".patch";
+                        string patchPath = Path.Combine(diffsDir, patchFileName);
+                        
+                        Console.WriteLine($"  [PATCH] {relativePath}");
+                        await CreatePatchAsync(oldFilePath, newFilePath, patchPath);
+
+                        string patchFileHash = await CalculateFileHashAsync(patchPath);
+
+                        fileActions.Add(new FileAction
+                        {
+                            Path = relativePath.Replace('\\', '/'),
+                            Action = "modified",
+                            PatchFile = "diffs/" + safeFileName + ".patch",
+                            PackageFileHash = patchFileHash,
+                            SourceHash = oldHash,
+                            TargetHash = newHash
+                        });
+                        patchCount++;
                     }
-
-                    string safeName = relativePath.Replace(Path.DirectorySeparatorChar, '_').Replace('/', '_');
-                    string patchFileName = safeName + ".patch";
-                    string patchPath = Path.Combine(diffsDir, patchFileName);
-
-                    Console.WriteLine($"  [PATCH] {relativePath}");
-                    CreatePatchFile(oldFilePath, newFilePath, patchPath);
-
-                    string patchFileHash = CalculateFileHash(patchPath);
-
-                    fileActions.Add(new FileAction
+                    else
                     {
-                        Path = relativePath.Replace('\\', '/'),
-                        Action = "modified",
-                        PatchFile = "diffs/" + patchFileName,
-                        PackageFileHash = patchFileHash,
-                        SourceHash = oldHash,
-                        TargetHash = newHash
-                    });
-                    patchCount++;
+                        // File is brand new - copy entirely
+                        string addPath = Path.Combine(addDir, safeFileName);
+                        
+                        Console.WriteLine($"  [ADD] {relativePath}");
+                        File.Copy(newFilePath, addPath, true);
+                        
+                        fileActions.Add(new FileAction
+                        {
+                            Path = relativePath.Replace('\\', '/'),
+                            Action = "added",
+                            AddFile = "add/" + safeFileName,
+                            PackageFileHash = newHash,
+                            TargetHash = newHash
+                        });
+                        addCount++;
+                    }
                 }
-                else
+                
+                // 5. Process removed files
+                foreach (var relativePath in oldFiles)
                 {
-                    string safeName = relativePath.Replace(Path.DirectorySeparatorChar, '_').Replace('/', '_');
-                    string addPath = Path.Combine(addDir, safeName);
-                    
-                    Console.WriteLine($"  [ADD] {relativePath}");
-                    File.Copy(newFilePath, addPath);
-                    
-                    fileActions.Add(new FileAction
+                    if (!newFiles.Contains(relativePath))
                     {
-                        Path = relativePath.Replace('\\', '/'),
-                        Action = "added",
-                        AddFile = "add/" + safeName,
-                        PackageFileHash = newHash,
-                        TargetHash = newHash
-                    });
-                    addCount++;
+                        Console.WriteLine($"  [REMOVE] {relativePath}");
+                        fileActions.Add(new FileAction
+                        {
+                            Path = relativePath.Replace('\\', '/'),
+                            Action = "removed"
+                        });
+                        removeCount++;
+                    }
                 }
-            }
-            
-            // Process removed files
-            foreach (var relativePath in oldFiles)
-            {
-                if (!newFiles.Contains(relativePath))
+                
+                Console.WriteLine($"\nSummary: {patchCount} modified, {addCount} added, {removeCount} removed, {unchangedCount} unchanged");
+                
+                // 6. Handle Fallback Installer if configured
+                string? fallbackInstallerFile = null;
+                string? fallbackInstallerHash = null;
+                
+                if (config != null && !string.IsNullOrEmpty(config.InstallerFile) && File.Exists(config.InstallerFile))
                 {
-                    Console.WriteLine($"  [REMOVE] {relativePath}");
-                    fileActions.Add(new FileAction
-                    {
-                        Path = relativePath.Replace('\\', '/'),
-                        Action = "removed"
-                    });
-                    removeCount++;
+                    string installerName = Path.GetFileName(config.InstallerFile);
+                    string installerDest = Path.Combine(outputDir, installerName);
+                    
+                    File.Copy(config.InstallerFile, installerDest, true);
+                 
+                    fallbackInstallerFile = installerName;
+                    fallbackInstallerHash = await CalculateFileHashAsync(installerDest);
+                    Console.WriteLine($"  [INSTALLER] Prepared fallback installer: {installerName}");
+                }
+
+                // 7. Handle Standalone Full Package creation if configured
+                string? fullPackageFile = null;
+                string? fullPackageHash = null;
+
+                if (config != null && !string.IsNullOrEmpty(config.FullPackageFile))
+                {
+                    string fullPath = Path.Combine(outputDir, config.FullPackageFile);
+                    
+                    Console.WriteLine($"  [FULL] Creating full package: {config.FullPackageFile}");
+                    if (File.Exists(fullPath)) File.Delete(fullPath);
+                    
+                    // Run zip compression on background thread to prevent blocking
+                    await Task.Run(() => ZipFile.CreateFromDirectory(newDir, fullPath, CompressionLevel.Optimal, false));
+                    
+                    fullPackageFile = config.FullPackageFile;
+                    fullPackageHash = await CalculateFileHashAsync(fullPath);
+                }
+
+                // 8. Generate the update manifest (meta.json)
+                var manifest = new UpdatePackageManifest
+                {
+                    VersionId = config?.NewVersionId ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                    Version = config?.Version ?? "1.0.0",
+                    FromVersionId = config?.FromVersionId ?? 0,
+                    ReleaseName = config?.ReleaseName ?? "Update Package",
+                    Changes = config?.Changes ?? new List<string>(),
+                    
+                    RestartRequired = config?.RestartRequired ?? true,
+                    Critical = config?.Critical ?? false,
+                    
+                    FallbackInstallerFile = fallbackInstallerFile,
+                    FallbackInstallerHash = fallbackInstallerHash,
+                    
+                    PatchUrlBase = config?.PatchUrlBase ?? "",
+                    FullPackageFile = fullPackageFile,
+                    FullPackageHash = fullPackageHash,
+                    
+                    Files = fileActions
+                };
+                
+                string manifestPath = Path.Combine(tempDir, "meta.json");
+                string jsonContent = JsonConvert.SerializeObject(manifest, Formatting.Indented);
+                await File.WriteAllTextAsync(manifestPath, jsonContent, Utf8NoBom);
+                
+                // 9. Cryptographically sign the manifest
+                Console.WriteLine("\nSigning manifest...");
+                await SignUpdatePackageManifestAsync(manifestPath, privateKeyPath);
+                
+                // 10. Zip the patches and manifest into final update.pkg
+                string packagePath = Path.Combine(outputDir, "update.pkg");
+                Console.WriteLine($"\nCreating package: {packagePath}");
+                
+                if (File.Exists(packagePath)) File.Delete(packagePath);
+                await Task.Run(() => ZipFile.CreateFromDirectory(tempDir, packagePath, CompressionLevel.Optimal, false));
+                
+                // Copy manifest to output dir as info.json for server index
+                File.Copy(manifestPath, Path.Combine(outputDir, "info.json"), true);
+                
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"\n--- Update package created successfully! ---");
+                Console.WriteLine($"Package: {packagePath}");
+                Console.WriteLine($"Size: {new FileInfo(packagePath).Length / 1024} KB");
+                Console.ResetColor();
+            }
+            finally
+            {
+                // Always clean up the temporary directory
+                if (Directory.Exists(tempDir))
+                {
+                    try { Directory.Delete(tempDir, true); } catch { }
                 }
             }
-            
-            Console.WriteLine($"\nSummary: {patchCount} modified, {addCount} added, {removeCount} removed, {unchangedCount} unchanged");
-            
-            // Handle Fallback Installer
-            string? fallbackInstallerFile = null;
-            string? fallbackInstallerHash = null;
-            string? fallbackInstallerArgs = null;
-            
-            if (config != null && !string.IsNullOrEmpty(config.InstallerFile))
-            {
-                 if (File.Exists(config.InstallerFile))
-                 {
-                     string installerName = Path.GetFileName(config.InstallerFile);
-                     // Create 'installer' subdirectory in package
-                     string installerDir = Path.Combine(tempDir, "installer");
-                     Directory.CreateDirectory(installerDir);
-                     
-                     string destPath = Path.Combine(installerDir, installerName);
-                     File.Copy(config.InstallerFile, destPath, true);
-                     
-                     fallbackInstallerFile = "installer/" + installerName;
-                     fallbackInstallerHash = CalculateFileHash(destPath);
-                     fallbackInstallerArgs = config.InstallerArguments;
-                     Console.WriteLine($"  [INSTALLER] Added fallback installer: {installerName}");
-                 }
-                 else
-                 {
-                     Console.WriteLine($"  [WARNING] Installer file specified in config not found: {config.InstallerFile}");
-                 }
-            }
-
-            // Handle Full Package (Standalone ZIP of new version)
-            string? fullPackageFile = null;
-            string? fullPackageHash = null;
-
-            if (config != null && !string.IsNullOrEmpty(config.FullPackageFile))
-            {
-                string fullPackageName = config.FullPackageFile; // e.g., "Full.zip"
-                string fullPackagePath = Path.Combine(outputDir, fullPackageName);
-                
-                Console.WriteLine($"  [FULL] Creating full package: {fullPackagePath}");
-                if (File.Exists(fullPackagePath)) File.Delete(fullPackagePath);
-                
-                // Create ZIP from newDir
-                ZipFile.CreateFromDirectory(newDir, fullPackagePath, CompressionLevel.Optimal, false);
-                
-                fullPackageFile = fullPackageName;
-                fullPackageHash = CalculateFileHash(fullPackagePath);
-                Console.WriteLine($"    Hash: {fullPackageHash}");
-            }
-
-            // Generate manifest
-            var manifest = new UpdatePackageManifest
-            {
-                VersionId = config?.NewVersionId ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                Version = config?.Version ?? "1.0.0",
-                FromVersionId = config?.FromVersionId ?? 0,
-                ReleaseName = config?.ReleaseName ?? "Update Package",
-                Changes = config?.Changes ?? new List<string>(),
-                
-                RestartRequired = config?.RestartRequired ?? true,
-                Critical = config?.Critical ?? false,
-                
-                FallbackInstallerFile = fallbackInstallerFile,
-                FallbackInstallerHash = fallbackInstallerHash,
-                FallbackInstallerArguments = fallbackInstallerArgs,
-                
-                FullPackageFile = fullPackageFile,
-                FullPackageHash = fullPackageHash,
-                
-                Files = fileActions
-            };
-            
-            // Write manifest (unsigned first)
-            string manifestPath = Path.Combine(tempDir, "meta.json");
-            string json = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings 
-            { 
-                Formatting = Formatting.Indented, 
-                NullValueHandling = NullValueHandling.Ignore 
-            });
-            File.WriteAllText(manifestPath, json);
-            
-            // Sign manifest
-            Console.WriteLine("\nSigning manifest...");
-            SignUpdatePackageManifest(manifestPath, privateKeyPath);
-            
-            // Create update.pkg (ZIP)
-            string packagePath = Path.Combine(outputDir, "update.pkg");
-            Console.WriteLine($"\nCreating package: {packagePath}");
-            
-            if (File.Exists(packagePath)) File.Delete(packagePath);
-            ZipFile.CreateFromDirectory(tempDir, packagePath, CompressionLevel.Optimal, false);
-            
-            // Also copy meta.json standalone for easy inspection
-            File.Copy(manifestPath, Path.Combine(outputDir, "meta.json"), true);
-            
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"\n--- Update package created successfully! ---");
-            Console.WriteLine($"Package: {packagePath}");
-            Console.WriteLine($"Size: {new FileInfo(packagePath).Length:N0} bytes");
-            Console.ResetColor();
         }
-        finally
-        {
-            // Cleanup temp directory
-            if (Directory.Exists(tempDir))
-            {
-                try { Directory.Delete(tempDir, true); } catch { }
-            }
-        }
-    }
-    
-    /// <summary>
-    /// Gets all files in a directory as relative paths.
-    /// </summary>
-    private static HashSet<string> GetRelativeFiles(string directory)
-    {
-        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in Directory.GetFiles(directory, "*.*", SearchOption.AllDirectories))
-        {
-            files.Add(Path.GetRelativePath(directory, file));
-        }
-        return files;
-    }
-    
-    /// <summary>
-    /// Creates a bsdiff patch file.
-    /// </summary>
-    private static void CreatePatchFile(string oldFilePath, string newFilePath, string patchPath)
-    {
-        string? directory = Path.GetDirectoryName(patchPath);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        var oldFileBytes = File.ReadAllBytes(oldFilePath);
-        var newFileBytes = File.ReadAllBytes(newFilePath);
-
-        using (var outputStream = File.Create(patchPath))
-        {
-            BinaryPatch.Create(oldFileBytes, newFileBytes, outputStream);
-        }
-    }
-    
-    /// <summary>
-    /// Signs the update package manifest with a private key.
-    /// </summary>
-    private static void SignUpdatePackageManifest(string manifestPath, string privateKeyPath)
-    {
-        string jsonContent = File.ReadAllText(manifestPath);
-        var manifest = JsonConvert.DeserializeObject<UpdatePackageManifest>(jsonContent);
-        if (manifest == null) throw new Exception("Failed to parse manifest file.");
         
-        manifest.Signature = null;
-        string dataToSign = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings
+        /// <summary>
+        /// Gets all files in a directory as relative paths.
+        /// </summary>
+        private static HashSet<string> GetRelativeFiles(string directory)
         {
-            Formatting = Formatting.Indented,
-            NullValueHandling = NullValueHandling.Ignore
-        });
-        dataToSign = dataToSign.Replace("\r\n", "\n");
+            var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.GetFiles(directory, "*.*", SearchOption.AllDirectories))
+            {
+                files.Add(Path.GetRelativePath(directory, file));
+            }
+            return files;
+        }
         
-        using (var ecdsa = ECDsa.Create())
+        /// <summary>
+        /// Signs the update package manifest with an ECDsa private key.
+        /// Removes any existing signature, formats it, signs the raw string, and embeds the signature.
+        /// </summary>
+        private static async Task SignUpdatePackageManifestAsync(string manifestPath, string privateKeyPath)
         {
-            ecdsa.ImportFromPem(File.ReadAllText(privateKeyPath));
-            var dataBytes = Encoding.UTF8.GetBytes(dataToSign);
-            var signatureBytes = ecdsa.SignData(dataBytes, HashAlgorithmName.SHA256);
+            // Use JObject to avoid double-serialization and keep exactly the same property order
+            string jsonContent = await File.ReadAllTextAsync(manifestPath, Utf8NoBom);
+            var jObj = JObject.Parse(jsonContent);
+            
+            // Remove signature field before hashing/signing
+            jObj.Remove("Signature"); 
+            
+            // Normalize line endings to \n to ensure signature remains valid across Linux/Windows servers
+            string dataToSign = jObj.ToString(Formatting.Indented).Replace("\r\n", "\n");
+            
+            using var ecdsa = ECDsa.Create();
+            string privateKeyContent = await File.ReadAllTextAsync(privateKeyPath, Utf8NoBom);
+            ecdsa.ImportFromPem(privateKeyContent);
+            
+            // Generate Signature
+            var signatureBytes = ecdsa.SignData(Utf8NoBom.GetBytes(dataToSign), HashAlgorithmName.SHA256);
             string signature = Convert.ToBase64String(signatureBytes);
 
-            manifest.Signature = signature;
-            string finalJson = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings
-            {
-                Formatting = Formatting.Indented,
-                NullValueHandling = NullValueHandling.Ignore
-            });
-            File.WriteAllText(manifestPath, finalJson);
-
+            // Re-insert signature into JSON and save
+            jObj["Signature"] = signature;
+            await File.WriteAllTextAsync(manifestPath, jObj.ToString(Formatting.Indented), Utf8NoBom);
+            
             Console.WriteLine("Manifest signed successfully!");
         }
     }

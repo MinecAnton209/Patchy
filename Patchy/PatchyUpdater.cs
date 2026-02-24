@@ -15,6 +15,21 @@ namespace Patchy
         private readonly string _publicKeyPem;
         private readonly Func<Task<bool>> _confirmFullDownload;
 
+        public PatchyUpdater(string infoUrl, string publicKeyPem, Func<Task<bool>> confirmFullDownloadCallback)
+        {
+            var handler = new HttpClientHandler() { AllowAutoRedirect = true };
+            _infoUrl = infoUrl;
+            _publicKeyPem = publicKeyPem;
+            _httpClient = new HttpClient(handler);
+            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Patchy-Updater");
+            _confirmFullDownload = confirmFullDownloadCallback ?? throw new ArgumentNullException(nameof(confirmFullDownloadCallback));
+        }
+        
+        public void Dispose()
+        {
+            _httpClient?.Dispose();
+        }
+        
         /// <summary>
         /// Checks for updates, verifies the signature of the update information.
         /// </summary>
@@ -34,14 +49,14 @@ namespace Patchy
             }
 
             // 2. Prepare data for verification (the entire JSON object without the "Signature" field)
-            var tempObj = JsonConvert.DeserializeObject<dynamic>(jsonContent);
-            if (tempObj == null)
-            {
-                throw new InvalidDataException("Update information is malformed.");
-            }
-            tempObj.Signature = null;
+            var jObj = Newtonsoft.Json.Linq.JObject.Parse(jsonContent);
+            var signature = jObj["Signature"]?.ToString();
+    
+            if (string.IsNullOrEmpty(signature))
+                throw new InvalidDataException("Signature is missing.");
+            jObj.Remove("Signature");
             // Use Formatting.Indented to match the format used during signing
-            string dataToVerify = JsonConvert.SerializeObject(tempObj, Formatting.Indented);
+            string dataToVerify = jObj.ToString(Formatting.Indented);
             
             // 3. Verify the signature using the public key
             if (!VerifySignature(dataToVerify, updateInfo.Signature))
@@ -72,7 +87,7 @@ namespace Patchy
             }
 
             // 2. Verify the SHA256 hash of the downloaded file
-            if (!VerifyFileHash(downloadedFilePath, updateInfo.FileHash))
+            if (!await VerifyFileHash(downloadedFilePath, updateInfo.FileHash))
             {
                 File.Delete(downloadedFilePath);
                 throw new CryptographicException("FILE HASH VERIFICATION FAILED! The update file is corrupt or has been tampered with.");
@@ -92,17 +107,11 @@ namespace Patchy
             }
         }
 
-        private bool VerifyFileHash(string filePath, string expectedHash)
+        private async Task<bool> VerifyFileHash(string filePath, string expectedHash)
         {
-            using (var sha256 = SHA256.Create())
-            {
-                using (var stream = File.OpenRead(filePath))
-                {
-                    var hashBytes = sha256.ComputeHash(stream);
-                    string actualHash = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
-                    return actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase);
-                }
-            }
+            string actualHash = await CalculateFileHash(filePath);
+            
+            return string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
         }
         
         /// <summary>
@@ -118,11 +127,9 @@ namespace Patchy
                 Debug.WriteLine($"Applying patch '{Path.GetFileName(patchFilePath)}' to '{Path.GetFileName(oldFilePath)}'...");
                 try
                 {
-                    using (Stream oldFileStream = File.OpenRead(oldFilePath))
-                    using (Stream newFileStream = File.Create(newFilePath))
-                    {
-                        BsDiff.BinaryPatch.Apply(oldFileStream, () => File.OpenRead(patchFilePath), newFileStream);
-                    }
+                    using Stream oldFileStream = File.OpenRead(oldFilePath);
+                    using Stream newFileStream = File.Create(newFilePath);
+                    BsDiff.BinaryPatch.Apply(oldFileStream, () => File.OpenRead(patchFilePath), newFileStream);
                     Debug.WriteLine($"Successfully created new file: {newFilePath}");
                 }
                 catch (Exception ex)
@@ -135,11 +142,9 @@ namespace Patchy
         
         public async Task PerformUpdateAsync(string currentVersionDirectory, long currentVersionId, IProgress<double>? progress = null, IProgress<string>? status = null)
         {
-            status?.Report("Initialization...");
-            progress?.Report(0);
-            
             Debug.WriteLine("Downloading and verifying release manifest...");
-            status?.Report("Getting updates...");
+            status?.Report("Checking for updates...");
+            progress?.Report(0);
             var manifest = await CheckForSimplifiedUpdateAsync();
 
             if (manifest.VersionId <= currentVersionId)
@@ -160,7 +165,7 @@ namespace Patchy
             try
             {
                 await CreateTarArchiveAsync(currentVersionDirectory, oldArchiveFile);
-                string localSourceHash = CalculateFileHash(oldArchiveFile);
+                string localSourceHash = await CalculateFileHash(oldArchiveFile);
 
                 if (localSourceHash.Equals(manifest.SourceArchiveHash, StringComparison.OrdinalIgnoreCase))
                 {
@@ -193,13 +198,13 @@ namespace Patchy
                 if (File.Exists(oldArchiveFile)) File.Delete(oldArchiveFile);
             }
 
-            string installerUrl = manifest.PatchUrlBase + manifest.InstallerFile;
-            string packageUrl = manifest.PatchUrlBase + packageToDownload;
+            string installerUrl = new Uri(new Uri(manifest.PatchUrlBase), manifest.InstallerFile).ToString();
+            string packageUrl = new Uri(new Uri(manifest.PatchUrlBase), packageToDownload).ToString();
 
             Debug.WriteLine("Downloading updater components...");
             status?.Report("Downloading installer components...");
             
-            string installerPath = await DownloadFileWithProgressAsync(
+            string installerPath = await DownloadFileWithResumeAsync(
                 installerUrl, 
                 manifest.InstallerFile, 
                 progress, 
@@ -209,7 +214,7 @@ namespace Patchy
             
             status?.Report("Downloading update files...");
             
-            string packagePath = await DownloadFileWithProgressAsync(
+            string packagePath = await DownloadFileWithResumeAsync(
                 packageUrl, 
                 packageToDownload, 
                 progress, 
@@ -224,8 +229,14 @@ namespace Patchy
             {
                 Debug.WriteLine("Verifying downloaded component hashes...");
                 
-                if (string.IsNullOrEmpty(manifest.InstallerFileHash) || 
-                    !CalculateFileHash(installerPath).Equals(manifest.InstallerFileHash, StringComparison.OrdinalIgnoreCase))
+                string actualInstallerHash = await CalculateFileHash(installerPath);
+                
+                if (string.IsNullOrEmpty(manifest.InstallerFileHash))
+                {
+                    throw new CryptographicException("Installer hash is missing in manifest!");
+                }
+                
+                if (!string.Equals(actualInstallerHash, manifest.InstallerFileHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new CryptographicException("Installer hash mismatch!");
                 }
@@ -237,8 +248,8 @@ namespace Patchy
                 }
                 else
                 {
-                    string localPackageHash = CalculateFileHash(packagePath);
-                    if (!localPackageHash.Equals(packageHash, StringComparison.OrdinalIgnoreCase))
+                    string localPackageHash = await CalculateFileHash(packagePath);
+                    if (!string.Equals(localPackageHash, packageHash, StringComparison.OrdinalIgnoreCase))
                     {
                         throw new CryptographicException($"Downloaded package hash mismatch! Expected '{packageHash}', got '{localPackageHash}'.");
                     }
@@ -267,84 +278,112 @@ namespace Patchy
             }
         }
         
-        /*private async Task<string> DownloadFileAsync(string url, string fileName)
+        private async Task<string> DownloadFileWithResumeAsync(
+            string url, 
+            string fileName, 
+            IProgress<double>? progressReporter = null, 
+            double startProgress = 0, 
+            double endProgress = 100)
         {
-            string tempPath = Path.Combine(Path.GetTempPath(), fileName);
-            var response = await _httpClient.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            using (var fs = new FileStream(tempPath, FileMode.Create))
+            string cacheDir = Path.Combine(Path.GetTempPath(), "PatchyDownloads");
+            Directory.CreateDirectory(cacheDir);
+            string filePath = Path.Combine(cacheDir, fileName);
+
+            int maxRetries = 5;
+            int delayMs = 2000;
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
-                await response.Content.CopyToAsync(fs);
-            }
-            return tempPath;
-        }*/
-
-        private async Task<string> DownloadFileWithProgressAsync(string url, string fileName, IProgress<double>? progressReporter, double startProgress, double endProgress)
-        {
-            string tempPath = Path.Combine(Path.GetTempPath(), fileName);
-
-            using (var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
-            {
-                response.EnsureSuccessStatusCode();
-                
-                long? totalBytes = response.Content.Headers.ContentLength;
-
-                using (var contentStream = await response.Content.ReadAsStreamAsync())
+                try
                 {
-                    using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+                    long existingLength = File.Exists(filePath) ? new FileInfo(filePath).Length : 0;
+
+                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                    if (existingLength > 0)
                     {
-                        var buffer = new byte[8192];
-                        long totalRead = 0;
-                        int bytesRead;
+                        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(existingLength, null);
+                    }
 
-                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+                    if (response.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable)
+                    {
+                        progressReporter?.Report(endProgress);
+                        return filePath; 
+                    }
+
+                    if (response.StatusCode == System.Net.HttpStatusCode.OK && existingLength > 0)
+                    {
+                        existingLength = 0;
+                        File.Delete(filePath);
+                    }
+                    else
+                    {
+                        response.EnsureSuccessStatusCode();
+                    }
+
+                    long? totalBytes = response.Content.Headers.ContentLength;
+                    if (totalBytes.HasValue) totalBytes += existingLength;
+                    
+                    FileMode mode = response.StatusCode == System.Net.HttpStatusCode.PartialContent ? FileMode.Append : FileMode.Create;
+
+                    await using var contentStream = await response.Content.ReadAsStreamAsync();
+                    await using var fileStream = new FileStream(filePath, mode, FileAccess.Write, FileShare.None, 8192, true);
+
+                    var buffer = new byte[8192];
+                    int bytesRead;
+
+                    while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    {
+                        await fileStream.WriteAsync(buffer, 0, bytesRead);
+                        existingLength += bytesRead;
+
+                        if (progressReporter != null && totalBytes.HasValue)
                         {
-                            await fileStream.WriteAsync(buffer, 0, bytesRead);
-
-                            if (progressReporter != null && totalBytes.HasValue)
-                            {
-                                totalRead += bytesRead;
-                                double filePercentage = (double)totalRead / totalBytes.Value;
-                                double totalProgress = startProgress + (filePercentage * (endProgress - startProgress));
-                                
-                                progressReporter.Report(totalProgress);
-                            }
+                            double filePercentage = (double)existingLength / totalBytes.Value;
+                            double totalProgress = startProgress + (filePercentage * (endProgress - startProgress));
+                            progressReporter.Report(totalProgress);
                         }
                     }
+
+                    return filePath;
+                }
+                catch (Exception ex) when (ex is HttpRequestException || ex is IOException || ex is TaskCanceledException)
+                {
+                    if (attempt == maxRetries) 
+                    {
+                        Debug.WriteLine($"Failed to download {fileName} after {maxRetries} attempts.");
+                        throw;
+                    }
+                    
+                    Debug.WriteLine($"Network error: {ex.Message}. Retrying {attempt}/{maxRetries} in {delayMs}ms...");
+                    await Task.Delay(delayMs);
+                    delayMs *= 2;
                 }
             }
             
-            return tempPath;
+            throw new Exception("Unreachable");
         }
-        
-        private async Task<string> DownloadFileAsync(string url, string fileName)
-        {
-            string tempPath = Path.Combine(Path.GetTempPath(), fileName);
-            
-            var fileBytes = await _httpClient.GetByteArrayAsync(url);
-            await File.WriteAllBytesAsync(tempPath, fileBytes);
     
-            return tempPath;
-        }
-            
         private Task ExtractTarArchiveAsync(string tarFilePath, string destinationDirectory)
         {
             return Task.Run(() => 
             {
-                using (FileStream fs = File.OpenRead(tarFilePath))
-                using (TarInputStream tarStream = new TarInputStream(fs, System.Text.Encoding.UTF8))
+                using FileStream fs = File.OpenRead(tarFilePath);
+                using TarInputStream tarStream = new TarInputStream(fs, Encoding.UTF8);
+                
+                TarEntry entry;
+                while ((entry = tarStream.GetNextEntry()) != null)
                 {
-                    TarEntry entry;
-                    while ((entry = tarStream.GetNextEntry()) != null)
-                    {
-                        if (entry.IsDirectory) continue;
-                        string destPath = Path.Combine(destinationDirectory, entry.Name);
-                        Directory.CreateDirectory(Path.GetDirectoryName(destPath));
-                        using (FileStream destStream = File.Create(destPath))
-                        {
-                            tarStream.CopyEntryContents(destStream);
-                        }
-                    }
+                    if (entry.IsDirectory) continue;
+                    
+                    string destPath = Path.Combine(destinationDirectory, entry.Name);
+                    
+                    string? dir = Path.GetDirectoryName(destPath);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    
+                    using FileStream destStream = File.Create(destPath);
+                    tarStream.CopyEntryContents(destStream);
                 }
             });
         }
@@ -387,29 +426,25 @@ namespace Patchy
         {
             return Task.Run(() =>
             {
-                using (FileStream fs = new FileStream(tarFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
-                using (TarOutputStream tarStream = new TarOutputStream(fs, System.Text.Encoding.UTF8))
+                using FileStream fs = new FileStream(tarFilePath, FileMode.Create, FileAccess.Write, FileShare.None,
+                    8192);
+                using TarOutputStream tarStream = new TarOutputStream(fs, Encoding.UTF8);
+                var files = Directory.GetFiles(sourceDirectory, "*.*", SearchOption.AllDirectories);
+                Array.Sort(files);
+
+                foreach (string filename in files)
                 {
-                    var files = Directory.GetFiles(sourceDirectory, "*.*", SearchOption.AllDirectories);
-                    Array.Sort(files);
+                    string relativePath = Path.GetRelativePath(sourceDirectory, filename);
 
-                    foreach (string filename in files)
-                    {
-                        FileInfo fileInfo = new FileInfo(filename);
-                        string relativePath = Path.GetRelativePath(sourceDirectory, filename);
-                        
-                        TarEntry entry = TarEntry.CreateEntryFromFile(filename);
-                        entry.Name = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-                        
-                        tarStream.PutNextEntry(entry);
+                    TarEntry entry = TarEntry.CreateEntryFromFile(filename);
+                    entry.Name = relativePath.Replace(Path.DirectorySeparatorChar, '/');
 
-                        using (FileStream inputFileStream = File.OpenRead(filename))
-                        {
-                            inputFileStream.CopyTo(tarStream);
-                        }
-                        
-                        tarStream.CloseEntry();
-                    }
+                    tarStream.PutNextEntry(entry);
+
+                    using FileStream inputFileStream = File.OpenRead(filename);
+                    inputFileStream.CopyTo(tarStream);
+
+                    tarStream.CloseEntry();
                 }
             });
         }
@@ -418,16 +453,13 @@ namespace Patchy
         /// Calculates the SHA256 hash of a file.
         /// </summary>
         /// <returns>A lowercase hex string of the hash.</returns>
-        private string CalculateFileHash(string filePath)
+        private async Task<string> CalculateFileHash(string filePath)
         {
-            using (var sha256 = SHA256.Create())
-            {
-                using (var stream = File.OpenRead(filePath))
-                {
-                    var hashBytes = sha256.ComputeHash(stream);
-                    return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
-                }
-            }
+            using var sha256 = SHA256.Create();
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
+            
+            var hashBytes = await sha256.ComputeHashAsync(stream);
+            return Convert.ToHexString(hashBytes).ToLowerInvariant();
         }
         
         private async Task<string> ApplyPatchAndUpdateAsync(SinglePatchManifest manifest, string oldArchiveFile)
@@ -436,10 +468,11 @@ namespace Patchy
             string newArchiveFile = "";
             try
             {
-                patchFile = await DownloadFileAsync(manifest.PatchUrlBase + manifest.PatchFile, manifest.PatchFile);
+                patchFile = await DownloadFileWithResumeAsync(manifest.PatchUrlBase + manifest.PatchFile, manifest.PatchFile);
         
                 Debug.WriteLine("Verifying patch hash...");
-                if (!CalculateFileHash(patchFile).Equals(manifest.PatchHash, StringComparison.OrdinalIgnoreCase))
+                string actualPatchHash = await CalculateFileHash(patchFile);
+                if (!string.Equals(actualPatchHash, manifest.PatchHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new Exception("Patch hash mismatch!");
                 }
@@ -450,7 +483,8 @@ namespace Patchy
                 await ApplyPatchAsync(oldArchiveFile, patchFile, newArchiveFile);
 
                 Debug.WriteLine("Verifying target archive hash...");
-                if (!CalculateFileHash(newArchiveFile).Equals(manifest.TargetArchiveHash, StringComparison.OrdinalIgnoreCase))
+                string actualTargetHash = await CalculateFileHash(newArchiveFile);
+                if (!string.Equals(actualTargetHash, manifest.TargetArchiveHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new Exception("Target hash mismatch after applying patch!");
                 }
@@ -473,13 +507,16 @@ namespace Patchy
         {
             string fullPackageUrl = manifest.PatchUrlBase + manifest.FullPackageFile;
             Debug.WriteLine($"Downloading full package from {fullPackageUrl}...");
-            string downloadedZip = await DownloadFileAsync(fullPackageUrl, manifest.FullPackageFile);
+            string downloadedZip = await DownloadFileWithResumeAsync(fullPackageUrl, manifest.FullPackageFile);
 
             Debug.WriteLine("Verifying full package hash...");
-            if (!string.IsNullOrEmpty(manifest.FullPackageHash) && 
-                !CalculateFileHash(downloadedZip).Equals(manifest.FullPackageHash, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(manifest.FullPackageHash))
             {
-                throw new Exception("Full package hash mismatch!");
+                string actualFullHash = await CalculateFileHash(downloadedZip);
+                if (!string.Equals(actualFullHash, manifest.FullPackageHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception("Full package hash mismatch!");
+                }
             }
             Debug.WriteLine("Full package hash OK.");
     
@@ -593,8 +630,8 @@ namespace Patchy
             // Verify source hash
             if (!string.IsNullOrEmpty(fileAction.SourceHash))
             {
-                string actualSourceHash = CalculateFileHash(targetPath);
-                if (!actualSourceHash.Equals(fileAction.SourceHash, StringComparison.OrdinalIgnoreCase))
+                string actualSourceHash = await CalculateFileHash(targetPath);
+                if (!string.Equals(actualSourceHash, fileAction.SourceHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new CryptographicException($"Source hash mismatch for {fileAction.Path}. Expected: {fileAction.SourceHash}, Got: {actualSourceHash}");
                 }
@@ -606,8 +643,8 @@ namespace Patchy
             
             if (!string.IsNullOrEmpty(fileAction.PackageFileHash))
             {
-                string actualPatchHash = CalculateFileHash(patchPath);
-                if (!actualPatchHash.Equals(fileAction.PackageFileHash, StringComparison.OrdinalIgnoreCase))
+                string actualPatchHash = await CalculateFileHash(patchPath);
+                if (!string.Equals(actualPatchHash, fileAction.PackageFileHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new CryptographicException($"Corrupted patch file in package: {fileAction.PatchFile}");
                 }
@@ -618,7 +655,7 @@ namespace Patchy
             // Verify target hash
             if (!string.IsNullOrEmpty(fileAction.TargetHash))
             {
-                string actualTargetHash = CalculateFileHash(tempOutputPath);
+                string actualTargetHash = await CalculateFileHash(tempOutputPath);
                 if (!actualTargetHash.Equals(fileAction.TargetHash, StringComparison.OrdinalIgnoreCase))
                 {
                     File.Delete(tempOutputPath);
@@ -628,7 +665,8 @@ namespace Patchy
             
             // Replace original with patched
             File.Delete(targetPath);
-            File.Move(tempOutputPath, targetPath);
+            File.Move(tempOutputPath, targetPath, true);
+            
         }
         
         private async Task ApplyAddedFileAsync(string extractDir, string targetPath, FileAction fileAction)
@@ -639,8 +677,8 @@ namespace Patchy
             
             if (!string.IsNullOrEmpty(fileAction.PackageFileHash))
             {
-                string actualHash = CalculateFileHash(sourcePath);
-                if (!actualHash.Equals(fileAction.PackageFileHash, StringComparison.OrdinalIgnoreCase))
+                string actualHash = await CalculateFileHash(sourcePath);
+                if (!string.Equals(actualHash, fileAction.PackageFileHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new CryptographicException($"Corrupted file in package: {fileAction.AddFile}");
                 }
@@ -654,7 +692,7 @@ namespace Patchy
             // Verify hash before copying
             if (!string.IsNullOrEmpty(fileAction.TargetHash))
             {
-                string actualHash = CalculateFileHash(sourcePath);
+                string actualHash = await CalculateFileHash(sourcePath);
                 if (!actualHash.Equals(fileAction.TargetHash, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new CryptographicException($"Hash mismatch for added file {fileAction.Path}. Expected: {fileAction.TargetHash}, Got: {actualHash}");
@@ -663,7 +701,7 @@ namespace Patchy
             
             // Create directory if needed
             string? directory = Path.GetDirectoryName(targetPath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            if (!string.IsNullOrEmpty(directory))
             {
                 Directory.CreateDirectory(directory);
             }
@@ -683,19 +721,6 @@ namespace Patchy
             {
                 Debug.WriteLine($"  File already removed or doesn't exist: {fileAction.Path}");
             }
-        }
-        
-        public PatchyUpdater(string infoUrl, string publicKeyPem, Func<Task<bool>> confirmFullDownloadCallback)
-        {
-            _infoUrl = infoUrl;
-            _publicKeyPem = publicKeyPem;
-            _httpClient = new HttpClient();
-            var handler = new HttpClientHandler()
-            {
-                AllowAutoRedirect = true
-            };
-            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Patchy-Updater");
-            _confirmFullDownload = confirmFullDownloadCallback ?? throw new ArgumentNullException(nameof(confirmFullDownloadCallback));
         }
     }
 }

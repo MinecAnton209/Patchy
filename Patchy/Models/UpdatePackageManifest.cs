@@ -26,6 +26,9 @@ namespace Patchy.Models
         
         [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
         public string? FallbackInstallerArguments { get; set; }
+        
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string? PatchUrlBase { get; set; }
 
         [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
         public string? FullPackageFile { get; set; }
