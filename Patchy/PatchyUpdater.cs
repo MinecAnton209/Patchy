@@ -10,6 +10,8 @@ namespace Patchy
 {
     public class PatchyUpdater
     {
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+        
         private readonly HttpClient _httpClient;
         private readonly string _infoUrl;
         private readonly string _publicKeyPem;
@@ -56,7 +58,7 @@ namespace Patchy
                 throw new InvalidDataException("Signature is missing.");
             jObj.Remove("Signature");
             // Use Formatting.Indented to match the format used during signing
-            string dataToVerify = jObj.ToString(Formatting.Indented);
+            string dataToVerify = jObj.ToString(Formatting.Indented).Replace("\r\n", "\n");
             
             // 3. Verify the signature using the public key
             if (!VerifySignature(dataToVerify, updateInfo.Signature))
@@ -101,7 +103,7 @@ namespace Patchy
             using (var ecdsa = ECDsa.Create())
             {
                 ecdsa.ImportFromPem(_publicKeyPem);
-                var dataBytes = Encoding.UTF8.GetBytes(data);
+                var dataBytes = Utf8NoBom.GetBytes(data);
                 var signatureBytes = Convert.FromBase64String(signature);
                 return ecdsa.VerifyData(dataBytes, signatureBytes, HashAlgorithmName.SHA256);
             }
@@ -154,9 +156,9 @@ namespace Patchy
             }
             Debug.WriteLine($"New version available! Server: {manifest.VersionId}, Client: {currentVersionId}.");
 
-            string packageToDownload;
-            string packageHash;
-            string updateMode;
+            string? packageToDownload;
+            string? packageHash;
+            string? updateMode;
 
             Debug.WriteLine("Creating archive of the current version...");
             status?.Report("Preparing local files...");
@@ -403,16 +405,7 @@ namespace Patchy
             
             jObj.Remove("Signature");
             
-            var serializerSettings = new JsonSerializerSettings
-            {
-                Formatting = Formatting.Indented,
-                DateTimeZoneHandling = DateTimeZoneHandling.Utc,
-                StringEscapeHandling = StringEscapeHandling.Default
-            };
-            
-            string dataToVerify = JsonConvert.SerializeObject(jObj, serializerSettings);
-            
-            dataToVerify = dataToVerify.Replace("\r\n", "\n");
+            string dataToVerify = jObj.ToString(Formatting.Indented).Replace("\r\n", "\n");
             
             if (!VerifySignature(dataToVerify, signature))
             {
@@ -421,7 +414,7 @@ namespace Patchy
             }
 
             Debug.WriteLine("Manifest signature is VALID.");
-            return JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent);
+            return JsonConvert.DeserializeObject<SinglePatchManifest>(jsonContent)!;
         }
 
         /// <summary>
@@ -512,7 +505,7 @@ namespace Patchy
         {
             string fullPackageUrl = manifest.PatchUrlBase + manifest.FullPackageFile;
             Debug.WriteLine($"Downloading full package from {fullPackageUrl}...");
-            string downloadedZip = await DownloadFileWithResumeAsync(fullPackageUrl, manifest.FullPackageFile);
+            string downloadedZip = await DownloadFileWithResumeAsync(fullPackageUrl, manifest.FullPackageFile!);
 
             Debug.WriteLine("Verifying full package hash...");
             if (!string.IsNullOrEmpty(manifest.FullPackageHash))
@@ -556,30 +549,30 @@ namespace Patchy
                     throw new InvalidDataException("Package does not contain meta.json manifest.");
                 }
                 
-                string jsonContent = await File.ReadAllTextAsync(manifestPath);
-                var manifest = JsonConvert.DeserializeObject<UpdatePackageManifest>(jsonContent);
+                string jsonContent = await File.ReadAllTextAsync(manifestPath, Utf8NoBom);
+                var jObj = Newtonsoft.Json.Linq.JObject.Parse(jsonContent);
+                var signature = jObj["Signature"]?.ToString();
                 
-                if (manifest == null || string.IsNullOrEmpty(manifest.Signature))
+                if (string.IsNullOrEmpty(signature))
                 {
                     throw new InvalidDataException("Manifest is malformed or signature is missing.");
                 }
                 
-                // Verify signature
-                var signature = manifest.Signature;
-                manifest.Signature = null;
-                string dataToVerify = JsonConvert.SerializeObject(manifest, new JsonSerializerSettings
-                {
-                    Formatting = Formatting.Indented,
-                    NullValueHandling = NullValueHandling.Ignore
-                });
-                dataToVerify = dataToVerify.Replace("\r\n", "\n");
-                manifest.Signature = signature;
+                jObj.Remove("Signature");
+                string dataToVerify = jObj.ToString(Formatting.Indented).Replace("\r\n", "\n");
                 
                 if (!VerifySignature(dataToVerify, signature))
                 {
                     throw new CryptographicException("SIGNATURE VERIFICATION FAILED! The update manifest has been tampered with.");
                 }
                 Debug.WriteLine("Manifest signature is VALID.");
+                
+                var manifest = JsonConvert.DeserializeObject<UpdatePackageManifest>(jsonContent);
+                
+                if (manifest == null)
+                {
+                    throw new InvalidDataException("Failed to deserialize update manifest.");
+                }
                 
                 // 3. Apply file actions
                 int applied = 0;

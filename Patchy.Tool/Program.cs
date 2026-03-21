@@ -338,6 +338,16 @@ namespace Patchy.Tool
                 Console.WriteLine("\nSigning manifest...");
                 await SignUpdatePackageManifestAsync(manifestPath, privateKeyPath);
                 
+                // 10. Verify the signature after signing
+                Console.WriteLine("Verifying signature...");
+                string publicKeyPath = privateKeyPath.Replace("privateKey.pem", "publicKey.pem");
+                if (!File.Exists(publicKeyPath))
+                {
+                    throw new FileNotFoundException("Public key not found for verification.", publicKeyPath);
+                }
+                await VerifyUpdatePackageManifestAsync(manifestPath, publicKeyPath);
+                Console.WriteLine("Signature verified successfully!");
+                
                 // 10. Zip the patches and manifest into final update.pkg
                 string packagePath = Path.Combine(outputDir, "update.pkg");
                 Console.WriteLine($"\nCreating package: {packagePath}");
@@ -407,6 +417,37 @@ namespace Patchy.Tool
             await File.WriteAllTextAsync(manifestPath, finalJson, Utf8NoBom);
             
             Console.WriteLine("Manifest signed successfully!");
+        }
+        
+        /// <summary>
+        /// Verifies the signature of the update package manifest using the public key.
+        /// Throws an exception if the signature is invalid.
+        /// </summary>
+        private static async Task VerifyUpdatePackageManifestAsync(string manifestPath, string publicKeyPath)
+        {
+            string jsonContent = await File.ReadAllTextAsync(manifestPath, Utf8NoBom);
+            var jObj = JObject.Parse(jsonContent);
+            
+            var signature = jObj["Signature"]?.ToString();
+            if (string.IsNullOrEmpty(signature))
+            {
+                throw new InvalidOperationException("Manifest is missing signature field.");
+            }
+            
+            jObj.Remove("Signature");
+            string dataToVerify = jObj.ToString(Formatting.Indented).Replace("\r\n", "\n");
+            
+            using var ecdsa = ECDsa.Create();
+            string publicKeyContent = await File.ReadAllTextAsync(publicKeyPath, Utf8NoBom);
+            ecdsa.ImportFromPem(publicKeyContent);
+            
+            var dataBytes = Utf8NoBom.GetBytes(dataToVerify);
+            var signatureBytes = Convert.FromBase64String(signature);
+            
+            if (!ecdsa.VerifyData(dataBytes, signatureBytes, HashAlgorithmName.SHA256))
+            {
+                throw new CryptographicException("Signature verification FAILED! The manifest may have been corrupted during signing.");
+            }
         }
     }
 }

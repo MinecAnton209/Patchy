@@ -2,5 +2,7 @@ bin/
 obj/
 /packages/
 /nuget/
+/nupkg/
+.idea/
 riderModule.iml
 /_ReSharper.Caches/
