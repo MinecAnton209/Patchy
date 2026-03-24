@@ -152,6 +152,7 @@ namespace Patchy
             if (manifest.VersionId <= currentVersionId)
             {
                 Debug.WriteLine($"You are on the latest version. Server: {manifest.VersionId}, Client: {currentVersionId}.");
+                status?.Report("You are on the latest version.");
                 return;
             }
             Debug.WriteLine($"New version available! Server: {manifest.VersionId}, Client: {currentVersionId}.");
@@ -178,16 +179,21 @@ namespace Patchy
                 }
                 else
                 {
-                    Debug.WriteLine($"Source hash mismatch! Expected '{manifest.SourceArchiveHash}', but got '{localSourceHash}'.");
+                    string reason = $"Source hash mismatch! Local files differ from expected version. Expected: {manifest.SourceArchiveHash.Substring(0, 8)}..., Got: {localSourceHash.Substring(0, 8)}...";
+                    Debug.WriteLine(reason);
+                    
                     if (string.IsNullOrEmpty(manifest.FullPackageFile))
                     {
+                        status?.Report($"Cannot update: Local files are modified and no full package available for recovery.");
                         throw new Exception("Local files are modified and no full package is available for recovery.");
                     }
                     
+                    status?.Report($"Cannot apply patch: {reason}. Full download required.");
                     bool userConfirmed = await _confirmFullDownload();
                     if (!userConfirmed)
                     {
                         Debug.WriteLine("User declined full download. Aborting update.");
+                        status?.Report("Update cancelled by user.");
                         return;
                     }
                     packageToDownload = manifest.FullPackageFile;
@@ -210,6 +216,7 @@ namespace Patchy
                 installerUrl, 
                 manifest.InstallerFile, 
                 progress, 
+                status,
                 startProgress: 10, 
                 endProgress: 20
             );
@@ -220,6 +227,7 @@ namespace Patchy
                 packageUrl, 
                 packageToDownload, 
                 progress, 
+                status,
                 startProgress: 20, 
                 endProgress: 90
             );
@@ -230,37 +238,44 @@ namespace Patchy
             try
             {
                 Debug.WriteLine("Verifying downloaded component hashes...");
+                status?.Report("Verifying downloaded files...");
                 
                 string actualInstallerHash = await CalculateFileHash(installerPath);
                 
                 if (string.IsNullOrEmpty(manifest.InstallerFileHash))
                 {
+                    status?.Report("Error: Installer hash is missing in manifest!");
                     throw new CryptographicException("Installer hash is missing in manifest!");
                 }
                 
                 if (!string.Equals(actualInstallerHash, manifest.InstallerFileHash, StringComparison.OrdinalIgnoreCase))
                 {
-                    throw new CryptographicException("Installer hash mismatch!");
+                    string errorMsg = $"Installer hash mismatch! Downloaded file may be corrupted.";
+                    status?.Report(errorMsg);
+                    throw new CryptographicException(errorMsg);
                 }
                 Debug.WriteLine("Installer hash is VALID.");
 
                 if (string.IsNullOrEmpty(packageHash))
                 {
                      Debug.WriteLine("Warning: No hash provided for the update package. Skipping verification.");
+                     status?.Report("Warning: No hash verification for update package.");
                 }
                 else
                 {
                     string localPackageHash = await CalculateFileHash(packagePath);
                     if (!string.Equals(localPackageHash, packageHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        throw new CryptographicException($"Downloaded package hash mismatch! Expected '{packageHash}', got '{localPackageHash}'.");
+                        string errorMsg = $"Update package hash mismatch! Downloaded file may be corrupted.";
+                        status?.Report(errorMsg);
+                        throw new CryptographicException(errorMsg);
                     }
                     Debug.WriteLine("Update package hash is VALID.");
                 }
                 Debug.WriteLine("All component hashes are VALID.");
                 
                 progress?.Report(100);
-                status?.Report("Restarting...");
+                status?.Report("Restarting application...");
 
                 int currentProcessId = Process.GetCurrentProcess().Id;
                 string arguments = $"{updateMode} \"{packagePath}\" /pid {currentProcessId} /path \"{currentVersionDirectory}\"";
@@ -284,6 +299,7 @@ namespace Patchy
             string url, 
             string fileName, 
             IProgress<double>? progressReporter = null, 
+            IProgress<string>? statusReporter = null,
             double startProgress = 0, 
             double endProgress = 100)
         {
@@ -354,11 +370,15 @@ namespace Patchy
                 {
                     if (attempt == maxRetries) 
                     {
-                        Debug.WriteLine($"Failed to download {fileName} after {maxRetries} attempts.");
+                        string errorMsg = $"Failed to download {fileName} after {maxRetries} attempts: {ex.Message}";
+                        Debug.WriteLine(errorMsg);
+                        statusReporter?.Report(errorMsg);
                         throw;
                     }
                     
-                    Debug.WriteLine($"Network error: {ex.Message}. Retrying {attempt}/{maxRetries} in {delayMs}ms...");
+                    string retryMsg = $"Network error: {ex.Message}. Retrying {attempt}/{maxRetries}...";
+                    Debug.WriteLine(retryMsg);
+                    statusReporter?.Report(retryMsg);
                     await Task.Delay(delayMs);
                     delayMs *= 2;
                 }
